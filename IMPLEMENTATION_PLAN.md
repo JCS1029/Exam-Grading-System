@@ -1,388 +1,338 @@
 # Automated Exam Grading & Plagiarism Detection System
-## System Architecture, Execution Plan & Master Checklist
+## Execution Plan
+
+**Target:** a system a real instructor uses to grade a real course, built by two developers.
+**Source requirements:** the course brief (מערכת בדיקת מבחנים) — transcribe handwritten Hebrew and mathematics, grade against the instructor's solution and scoring key, allow creative-but-correct solutions, detect copying in an independent stage, flag low-confidence scans, and produce an instructor report identifying global difficulty points.
 
 ---
 
-## Executive Summary
+## 1. Scope
 
-The **Automated Exam Grading & Plagiarism Detection System** is an enterprise-grade AI solution designed to automate the intake, layout analysis, bilingual transcription (Hebrew text + LTR mathematical formulas), semantic grading with creative problem-solving diversity, independent cross-student plagiarism detection, and comprehensive instructor analytics.
+### 1.1 What this system does
 
-```mermaid
-graph TD
-    A[Student Handwritten Scans PDF/TIFF] --> B[Preprocessing & Document Dewarping]
-    B --> C[Layout Analysis & Column Segmentation YOLO/DLA]
-    C --> D[Reading Order DAG RTL Hebrew + LTR Math]
-    D --> E[Vision-Language Transcription Engine Gemini 1.5 Pro / GPT-4o]
-    E --> F{Confidence Check OCR Score >= tau?}
-    F -- No --> G[HITL Verification Queue Instructor Review]
-    F -- Yes --> H[Canonical Exam Representation JSON + LaTeX]
-    
-    I[Instructor Master Solution & Scoring Key] --> J[Rubric Decomposition Engine Atomic Criteria + Error Rules]
-    
-    H --> K[Semantic Grading Engine Agentic Multi-Path Reasoner + SymPy]
-    J --> K
-    K --> L[Grade Breakdown & Itemized Feedback]
-    
-    H --> M[Decoupled Plagiarism Detection Engine]
-    M --> N[Embedding Sim + Derivation Graph Isomorphism + Error Fingerprinting]
-    N --> O[Collusion Clusters & Side-by-Side Diff Report]
-    
-    L --> P[Instructor Analytics & Difficulty Dashboard]
-    O --> P
-    G --> P
+| Brief requirement | Implemented by |
+| :--- | :--- |
+| Handwriting → text, including formulas | Phase 2 — VLM transcription to Hebrew text + LaTeX |
+| Operates from the exam and solution alone | Phase 3 — rubric derived from the instructor's own solution; no training corpus |
+| Flexibility for creative correct solutions | Phase 3 — rubric milestones + symbolic equivalence, not string matching |
+| Independent copy-detection stage | Phase 4 — cohort batch job, runs on anonymised transcripts after grading |
+| Flag low-confidence handwriting decoding | Phase 5 — calibrated confidence, routed to human review |
+| Instructor report with global difficulty points | Phase 6 — item statistics + misconception clusters |
+
+### 1.2 Non-goals
+
+Explicitly out of scope. Each of these was considered and cut because it costs weeks and does not move any requirement in the brief:
+
+- Kubernetes, Helm, GPU autoscaling, Prometheus/Grafana. One instructor grading one course does not need a cluster.
+- Celery / Temporal / Redis. A database-backed job table with a worker process handles this workload.
+- PostgreSQL + pgvector, S3/MinIO. SQLite plus local encrypted disk is sufficient and far easier to back up. Postgres stays available as a later swap behind SQLAlchemy.
+- Fine-tuning a layout model (YOLO / LayoutLMv3). This requires a labelled corpus of multi-column handwritten Hebrew exams that does not exist and would take a semester to build. Phase 2 achieves segmentation with the VLM plus classical CV priors instead.
+- LTI 1.3 / bidirectional LMS integration. Moodle-compatible CSV export covers the real need.
+- Role-based access control beyond instructor and teaching assistant.
+- Self-hosted embedding models requiring a local GPU.
+
+### 1.3 Scale assumption
+
+Design target: up to 300 students × up to 12 pages, processed within 12 hours of upload. Everything above is sized to that, not to an enterprise tenant.
+
+---
+
+## 2. Deployment posture ladder
+
+The system grades real students, so autonomy is earned with evidence rather than assumed. Each rung requires the previous rung's gate to pass on real exam data.
+
+| Rung | Behaviour | Entry condition |
+| :--- | :--- | :--- |
+| **R0 — Shadow** | System grades; instructor grades the same exam independently; only the comparison is used. No student sees a system-produced grade. | Phase 3 gate passed on pilot data |
+| **R1 — Assistive** | System proposes every grade with evidence; instructor confirms or edits every question before release. | R0 agreement metrics met on a real exam |
+| **R2 — Selective autonomy** | High-confidence questions auto-finalise; everything else goes to human review. | R1 shows the high-confidence band holds its error bound over two exams |
+
+**R2 is never the starting configuration, and the ladder never applies to copy detection at all.** Suspected collusion is always instructor-adjudicated — the system produces evidence, never an accusation and never a sanction.
+
+---
+
+## 3. Phases
+
+Each phase has an **exit gate**: numeric criteria measured on held-out data. A phase is not finished when the code runs, it is finished when the gate passes. Gate numbers are targets to be revised once Phase 0 tells us what is actually achievable — a revised target with data behind it is a result; an unmeasured target is decoration.
+
+---
+
+### Phase 0 — Model bake-off and feasibility (the risk-retirement phase)
+
+The brief names Hebrew handwriting as the primary difficulty. Nothing gets built until it is measured, because the answer determines the architecture of everything downstream. This phase also produces the empirical model comparison the course report needs.
+
+**Work**
+
+- Collect a pilot set: 12–15 real handwritten exam pages, deliberately including at least 4 multi-column pages, 2 pages with heavy strikethrough, and a range of handwriting legibility. Obtain them with consent, from a past course if possible.
+- Hand-produce ground truth for the pilot set: Hebrew prose transcript plus LaTeX per formula. This is tedious and unavoidable; it is the measuring stick for the entire project.
+- Transcribe the pilot set with each candidate and record cost and latency per page:
+  - `gemini-3.1-pro-preview` — strongest spatial and multimodal reasoning
+  - `gemini-3.5-flash` — the cheap high-volume tier
+  - `gpt-5.6-sol` — independent second opinion, and the cross-check candidate
+  - one classical baseline (Tesseract Hebrew, or DocTR) to quantify how much the VLM is actually buying
+- Score Hebrew prose and mathematics **separately**. They fail in different ways and a blended number hides which half is broken.
+  - Hebrew prose: character error rate via `jiwer`, after Unicode NFC normalisation and stripping niqqud.
+  - Mathematics: exact match of the SymPy-canonicalised expression; report separately the rate of LaTeX that fails to parse at all.
+- Test the cheap multi-column approach before assuming a layout model is needed: full page to the VLM requesting question regions and reading order, with an OpenCV vertical projection profile supplied as a gutter prior.
+- Measure cost per page on the real pilot, then extrapolate to full-cohort cost. Do not estimate this from published per-token prices alone; high-resolution image inputs dominate and the multiplier is easy to get wrong by an order of magnitude.
+
+**Exit gate**
+
+| Metric | Threshold |
+| :--- | :--- |
+| Hebrew prose CER, best model | ≤ 8% (aim ≤ 5%) |
+| Formula exact-match after canonicalisation | ≥ 85% |
+| LaTeX that parses under SymPy/KaTeX | ≥ 95% |
+| Question regions located on pilot set | 100% recall — a missed question must never become a silent zero |
+| Full-cohort cost projection | within the project's API budget |
+
+**Deliverable:** a decision memo with the numbers, the chosen model pinned to an exact version ID, and a written statement of what fails and why.
+
+**If the gate fails:** stop and escalate rather than proceeding. Options in order of preference — require better scan quality (300 DPI flatbed rather than phone photos), restrict to printed-answer templates with defined answer boxes, or narrow to a question type with less free-form Hebrew prose. Proceeding past a failed transcription gate produces a system that grades noise.
+
+---
+
+### Phase 1 — Intake, booklet reconciliation, preprocessing, anonymisation
+
+**Work**
+
+- Multi-page PDF and image intake (PDF via PyMuPDF rasterisation at configurable DPI; JPEG/PNG/TIFF direct).
+- **Booklet reconciliation.** This is the highest-consequence correctness problem in the system and it is not glamorous: pages must be attributed to the right student. Implement anonymous booklet ID detection from the exam's ID field or barcode, validate the page count per booklet against the expected count, and reconcile the booklet set against the course roster. Any unmatched page, duplicate ID, or short booklet **halts that booklet and raises it to the instructor**. Silent mis-attribution gives a student someone else's grade, and no downstream accuracy metric will catch it.
+- Deskew via Hough transform plus projection-profile refinement; perspective rectification by page-border homography.
+- CLAHE adaptive contrast for faint pencil.
+- **Anonymisation before any external API call.** Detect and mask the identity header region, assign a pseudonym, and store the pseudonym↔student mapping in a separate local table that never leaves the machine. This serves two purposes: privacy compliance, and removing identity bias from grading — which is also what makes the independent copy-detection stage credible.
+
+**Exit gate**
+
+| Metric | Threshold |
+| :--- | :--- |
+| Pilot pages ingested without crash | 100% |
+| Residual skew after correction | ≤ 0.5° |
+| Identity regions masked before egress | 100% — hard gate, zero exceptions |
+| Booklet mis-attribution on a deliberately shuffled/short-booklet test set | 0 silent errors; every case halted and surfaced |
+
+---
+
+### Phase 2 — Layout, multi-column reading order, transcription
+
+The brief's second stated difficulty. The key realisation: because grading is per-question, a globally perfect reading order is not required — reliable **question-level segmentation** is. That is a much easier target.
+
+**Work**
+
+- Question segmentation: VLM identifies question and sub-question regions from the full page; OpenCV vertical projection profile detects column gutters and is passed as a prior.
+- **Coverage validation.** Cross-check detected question IDs against the question list parsed from the instructor's exam. Distinguish three states that must never be conflated: *answered*, *deliberately left blank* (legitimately zero), and *not found by the system* (a system failure requiring review). Collapsing the last two into a zero is a silent grading bug that harms students.
+- Reading-order resolution within a question: right column before left for Hebrew prose, left-to-right preserved inside mathematical blocks, with visual continuation arrows followed.
+- Strikethrough and scratch-work exclusion, so discarded derivations are not graded.
+- Transcription to the canonical schema: `hebrew_text`, `math_latex[]`, `interleaved_markdown`, `flagged_tokens[]`, plus the raw model response retained for audit.
+- LaTeX validation through SymPy/KaTeX; parse failure triggers re-transcription of that region, then cross-model check.
+
+**Exit gate**
+
+Measured on a fresh held-out set, not the Phase 0 pilot.
+
+| Metric | Threshold |
+| :--- | :--- |
+| Question segmentation recall / precision | ≥ 99% / ≥ 95% |
+| Reading order correct on multi-column pages | ≥ 95% |
+| Crossed-out regions correctly excluded | ≥ 90% |
+| CER regression vs. Phase 0 | ≤ 2 percentage points |
+| Unanswered vs. not-found correctly distinguished | 100% |
+
+---
+
+### Phase 3 — Grading engine: rubric, diversity, consequential error
+
+**Work**
+
+- **Rubric extraction.** Parse the instructor's solution and scoring key into discrete milestones with point weights. Critically, this is a *proposal* — the instructor reviews and edits the extracted rubric before any grading runs. An LLM misreading the scoring key must not silently become the grading standard.
+- **Alternative solution paths.** Two complementary mechanisms, because the brief's diversity requirement cannot be met by rubric enumeration alone:
+  1. Instructor-declared alternative paths in the rubric (energy conservation vs. Newtonian, direct proof vs. contradiction).
+  2. An open-ended validity check for methods nobody enumerated: the grader must judge whether the student's reasoning is mathematically sound and reaches the required conclusion, independent of the rubric's route. This path is always routed to human review — a novel valid method is exactly the case where the system is least trustworthy and the cost of a wrong automatic zero is highest.
+- **Symbolic equivalence** via SymPy: `simplify(student - solution) == 0`, with numeric spot-checking as a fallback for expressions SymPy cannot close. Prevents penalising correct-but-unsimplified answers.
+- **Consequential error ("ציון נגרר").** Deduct once for the originating slip, then re-evaluate every downstream milestone by substituting the student's own erroneous intermediate value. Correct reasoning from a wrong number earns full credit for that step.
+- **Reproducibility, required for real use.** Temperature 0, exact pinned model version, prompt version recorded, and the raw model response stored with every grade. A grade an instructor cannot reconstruct and defend during an appeal is not usable on real students. Model version must be frozen for the duration of a cohort's grading — a mid-run change means students were graded by different systems.
+- Re-grade on rubric change: when the instructor edits a rubric, affected questions are re-run and re-versioned rather than left stale.
+
+**Exit gate**
+
+Compared against the instructor's own independent grading of the same exams (per-question scale normalised to 10 points).
+
+| Metric | Threshold |
+| :--- | :--- |
+| Mean absolute error per question | ≤ 1.0 point |
+| Questions within ±1 point of instructor | ≥ 85% |
+| Correlation of total exam score | Pearson r ≥ 0.90 |
+| Mean **signed** error | within ±0.3 point — catches systematic over- or under-generosity that MAE hides |
+| Curated valid-alternative-method set receiving full credit | ≥ 90% |
+| Curated consequential-error set deducting exactly once | ≥ 90% |
+
+The last two rows need purpose-built test sets: write out several genuinely different correct solutions per question, and several solutions containing a deliberate early arithmetic slip with correct subsequent reasoning. These directly test the two hardest requirements in the brief and no generic accuracy metric substitutes for them.
+
+---
+
+### Phase 4 — Independent copy detection
+
+Runs as a separate cohort-wide batch job on anonymised transcripts, after grading, with no access to grades. Independence is a requirement of the brief and also what keeps it from becoming circular.
+
+**Work**
+
+- Layer 1 — semantic similarity: embed per-question answers (`gemini-embedding-2`), pairwise cosine similarity, plus MinHash/LSH n-gram near-duplicate matching via `datasketch`.
+- Layer 2 — derivation structure: parse LaTeX step sequences into derivation graphs; compare with graph edit distance and longest common subsequence over canonicalised operations (`networkx`).
+- Layer 3 — idiosyncratic fingerprinting, the discriminating signal: two students reaching the same correct answer is expected and carries almost no information. Two students sharing the same bizarre arithmetic error, the same unusual substitution variable, or the same non-standard notation is the actual evidence. Score on *shared anomaly*, explicitly down-weighting agreement with the standard solution path.
+- Clustering: threshold plus connected components. Louvain community detection only when the cohort is large enough for it to mean anything — on 40 students it is theatre.
+- Evidence dossier: side-by-side crops and transcripts with the specific shared anomalies highlighted, and the reasoning stated in plain language. Output is evidence for a human decision, not a verdict.
+
+**Evaluation.** Real copying is unlabelled, so build a synthetic positive set: take real answers, paraphrase them, perturb a few steps, reorder some derivations, and insert them as additional students. Also build a hard negative set — pairs of independent students both giving the standard textbook solution — because that is the false positive that destroys trust and ruins a student's record.
+
+**Exit gate**
+
+| Metric | Threshold |
+| :--- | :--- |
+| Recall on synthetic positives | ≥ 90% |
+| False positive rate on hard negatives (independent standard solutions) | ≤ 2% |
+| Share of all pairs surfaced for review | ≤ 5% — review load must be tractable |
+
+---
+
+### Phase 5 — Confidence calibration and human review
+
+**Work**
+
+- **Do not trust self-reported model confidence.** A VLM will return 0.95 on a garbled transcription; self-reported confidence is poorly calibrated and using it as the primary signal would make the brief's low-confidence flagging requirement decorative. Build the score from signals with actual evidence behind them:
+  - **Cross-model disagreement** — transcribe twice (two models, or one model at two temperatures) and measure divergence. This is the strongest available signal for roughly double the transcription cost, and can be applied selectively.
+  - LaTeX parse success and symbolic verification outcome (deterministic, therefore trustworthy).
+  - Segmentation stability: overlapping regions, ambiguous gutters, unresolved continuation arrows.
+  - Grader-internal consistency: whether rubric matching and the symbolic check agree.
+  - Self-reported confidence and flagged tokens, as a weak additional input only.
+- **Derive the thresholds; do not invent them.** Plot flagged-versus-actually-wrong on the validation set and choose cut points from that curve. Record the curve — it is a reportable result and it is what justifies the bands to an examiner or a department.
+- Review workbench: original scan crop beside the transcription and proposed score, with inline LaTeX editing, point override, and a one-click confirm for the fast path.
+- Audit trail: every instructor override logged with before/after, timestamp, and the model version and prompt version in force. This is the appeal record.
+- Feed overrides back into few-shot examples and rubric refinement.
+
+**Exit gate**
+
+| Metric | Threshold |
+| :--- | :--- |
+| Error rate among auto-finalised (high-confidence) questions | ≤ 2% — the safety-critical number |
+| Precision of low-confidence flagging (flagged items that genuinely contain an error) | ≥ 60% |
+| Median instructor review time, medium-confidence question | ≤ 15 seconds, measured not assumed |
+| Thresholds traceable to the calibration curve | required |
+
+---
+
+### Phase 6 — Instructor report and global difficulty diagnostics
+
+This is the brief's stated end goal, and the most common way projects like this fail is reaching it with no time left. The thin end-to-end slice in Phase 7's sequencing note exists to prevent exactly that.
+
+**Work**
+
+- **Item statistics sized to the actual cohort.** Item Response Theory two-parameter estimates need roughly 100+ examinees to be stable; on a 40-student course they produce confident-looking noise. Default to Classical Test Theory item analysis — facility index (mean fraction of points earned) and discrimination via point-biserial correlation plus the top/bottom 27% index — and enable IRT only when the cohort is large enough, with the threshold enforced in code rather than left to judgement.
+- Misconception clustering: embed the deduction reasons, cluster, and label each cluster, yielding statements of the form "48% of students lost points on Q3 for omitting the integration constant."
+- Global difficulty ranking across questions, plus score distribution and per-topic mastery.
+- Hebrew PDF output. Render by printing the same Jinja2 HTML the review workbench serves, via headless Chromium (Playwright). A real browser gives native right-to-left layout and already-rendered KaTeX, which avoids the two things that make this painful otherwise — WeasyPrint needs a separate GTK/Pango runtime on Windows and cannot render LaTeX without pre-converting it to MathML or SVG. Still budget real time here: bidirectional prose mixed with left-to-right LaTeX is a known source of rendering defects.
+- Per-student feedback report in Hebrew, and Moodle-compatible CSV grade export.
+
+**Exit gate**
+
+| Metric | Threshold |
+| :--- | :--- |
+| Instructor agreement that the top-3 reported difficulty points match their own judgement | recorded per pilot exam |
+| Misconception clusters judged coherent by the instructor | ≥ 70% |
+| Hebrew PDF renders correctly, including RTL prose with embedded LaTeX | visually verified |
+| Non-discriminating items flagged (point-biserial < 0.2) | reported |
+
+---
+
+### Phase 7 — Privacy, hardening, and supervised pilot
+
+The system now touches real student work, which imposes obligations independent of how well it grades.
+
+**Work**
+
+- Privacy and legal groundwork, needed *before* real student data is processed: institutional approval, a data processing agreement or zero-retention configuration with each API provider, a written retention and deletion policy, and an audit confirming no personally identifying data reaches any external API. The anonymisation gate from Phase 1 is the technical half; this is the other half.
+- Encryption at rest for `storage/`, TLS in transit, secrets only via `.env`.
+- Instructor and TA roles, scoped to their own courses.
+- Backup and restore, exercised at least once — an untested restore is not a backup.
+- Failure handling: API rate limits and outages with `tenacity` backoff, resumable jobs, partial-batch recovery. A crash 300 booklets into a 400-booklet run must not require restarting from zero.
+- Load check at the design target (300 students × 12 pages).
+- **Supervised pilot at rung R0.** Run one real exam in shadow mode: the system grades, the instructor grades independently, and the two are compared. Only if the Phase 3 and Phase 5 gates hold on this real data does the system advance to R1.
+
+**Exit gate**
+
+| Metric | Threshold |
+| :--- | :--- |
+| PII reaching external APIs | zero, audit-verified |
+| Restore from backup | performed successfully |
+| Full-cohort run at design target | completes within 12 hours |
+| Interrupted run resumed without data loss or duplication | verified |
+| Phase 3 and Phase 5 gates on real shadow-mode exam | hold |
+
+---
+
+## 4. Sequencing
+
+Build a **thin vertical slice first**, then deepen. After Phase 0 and a minimal Phase 1, wire one exam and one question end to end — intake, transcription, grading, report — even if every stage is crude. Then improve each stage in phase order.
+
+The reason is scheduling risk. The brief's deliverable is the instructor report; if the work runs long while still inside transcription, there is nothing to show. A crude end-to-end path converts that risk into a quality problem instead of an existence problem, and it surfaces integration mismatches early, when they are cheap.
+
+---
+
+## 5. Cross-cutting requirements
+
+**Reproducibility.** Pinned model versions, temperature 0, versioned prompts, raw responses retained, model version frozen for the duration of a cohort. Without these, grades cannot be defended on appeal and results cannot be reproduced for the report.
+
+**Cost control.** Measure cost per page in Phase 0 and project it before committing to an architecture. Route the bulk of pages through the Flash tier and escalate to Pro only on low confidence. Cache by image hash so re-runs during development are free. Track spend per exam.
+
+**Honest failure.** Every stage must distinguish "confidently determined" from "could not determine", and the second must reach a human. The most damaging failure mode in an automated grading system is not a visible error — it is a confident silent one: a zero for a question the system failed to find, a grade from a mis-attributed booklet, a plagiarism flag on two students who independently wrote the textbook proof.
+
+---
+
+## 6. Technology choices
+
+| Concern | Choice | Reasoning |
+| :--- | :--- | :--- |
+| API / backend | FastAPI | Already in `requirements.txt`; async suits API-bound work |
+| Database | SQLite (WAL) via SQLAlchemy | Sufficient at design scale, trivial to back up; Postgres swappable later |
+| Job execution | DB-backed job table + worker process | No broker to operate; resumable by construction |
+| Frontend | Jinja2 + HTMX + KaTeX | The review workbench is forms and crops; a SPA is weeks of work for no requirement |
+| Storage | Local encrypted `storage/` | Student scans on institution-controlled disk |
+| Deployment | Docker Compose on a single machine | Matches the actual operating environment |
+
+### 6.1 Model configuration
+
+The original configuration pinned `gemini-1.5-pro` and `gemini-1.5-flash`, which were **shut down on 29 September 2025** and return 404. `gpt-4o` shuts down 23 October 2026 and `gemini-2.5-pro` retires 16 October 2026, so neither is a viable target either. `.env.example` now carries:
+
+```ini
+PRIMARY_VLM_MODEL="gemini-3.1-pro-preview"   # strongest spatial/multimodal reasoning
+FAST_VLM_MODEL="gemini-3.5-flash"            # high-volume tier
+CROSSCHECK_VLM_MODEL="gpt-5.6-sol"           # independent second opinion
+EMBEDDING_MODEL="gemini-embedding-2"         # multimodal; handles text and image crops
+```
+
+Confirm availability with a live `models.list` call before Phase 0, since the Gemini 3.x line moves quickly. Pin exact version IDs and **never use the `-latest` aliases** — they re-point without notice, which would mean a cohort graded by two different models.
+
+### 6.2 Missing dependencies
+
+`requirements.txt` currently contains **no Google SDK at all**, so the primary transcription engine cannot be called. Also absent are libraries for components the plan depends on:
+
+```
+google-genai          # primary VLM — currently missing entirely
+PyMuPDF               # PDF rasterisation for multi-page intake
+networkx              # derivation graphs, GED, clustering (Phase 4)
+datasketch            # MinHash/LSH near-duplicate detection (Phase 4)
+jiwer                 # CER/WER measurement (Phase 0 gate)
+jinja2 + playwright   # Hebrew RTL PDF reports via headless Chromium (Phase 6)
+sqlalchemy + alembic  # persistence and migrations
+tenacity              # API retry/backoff
+pytest-asyncio        # async test support
 ```
 
 ---
 
-## 1. Architectural Strategy & Model Selection
+## 7. Open decisions
 
-### 1.1 VLM & OCR Pipeline (Hebrew + Complex Math)
-
-#### The Core Technical Challenge
-Hebrew is a Right-to-Left (RTL) Semitic script, while mathematical formulas, equations, matrices, and variables ($x, y, f(x)$) are strictly Left-to-Right (LTR). In handwritten STEM exams:
-- Students interleave Hebrew textual explanations with inline and block mathematical formulas.
-- Traditional OCR engines (Tesseract, EasyOCR, ABBYY FineReader) treat text blocks with a single reading direction and lack LaTeX semantic understanding for handwritten fractions, integrals, and superscripts.
-- Specialized math OCR tools (Mathpix, Nougat) are strictly English/LTR-oriented and fail on Hebrew script, often transliterating Hebrew characters into broken Cyrillic or Greek symbols.
-
-#### Model Evaluation Matrix
-
-| Criterion | Google Gemini 1.5 Pro | OpenAI GPT-4o | Anthropic Claude 3.5 Sonnet | Specialized OCR Hybrid (YOLO + TrOCR/DocTR + Mathpix) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Handwritten Hebrew Recognition** | **Exceptional** (High accuracy on cursive/script Hebrew; robust to vowel points and ligature variations) | **Strong** (Good on standard handwriting; occasionally confuses visually similar letters like ו/ז/י, ח/ת/ה) | **Moderate-High** (Reliable on printed Hebrew, slightly higher error rate on rapid cursive Hebrew) | **Poor to Moderate** (Requires separate fine-tuned Hebrew TrOCR model; brittle at boundaries) |
-| **Complex Math / LaTeX Formatting** | **Exceptional** (Generates syntactically valid LaTeX, matrix notation, inline and multiline alignments) | **Exceptional** (Strong LaTeX fidelity, clean symbol transcription) | **Exceptional** (Highest benchmark scores on math reasoning and diagrams) | **High** (Mathpix is industry standard for math, but breaks when mixed with Hebrew) |
-| **Bi-directional (RTL/LTR) Handling** | **Native** (Maintains proper context switching between Hebrew rationale and math derivations) | **Strong** (Occasional token reversal at immediate Hebrew-math boundaries) | **Strong** (Proper contextual separation) | **Critical Failure** (Requires manual text-line slicing and direction tagging) |
-| **Multi-Column & Spatial Awareness** | **High** (Large 2M token context, preserves 2D visual coordinate grounding) | **High** (Strong visual grounding via bounding box prompts) | **Exceptional** (Pinpoint layout comprehension and spatial coordinates) | **Manual Pipeline Required** (Requires custom layout segmentation model) |
-| **Cost & Throughput** | **Optimal** (High throughput, competitive batch pricing, large input window for entire exams) | **Moderate** (Higher cost per page, lower token window for bulk exams) | **Higher** (Higher API cost for heavy vision tasks) | **High Maintenance** (Self-hosting, multi-model infrastructure overhead) |
-
-#### Recommended Strategy: Tiered Hybrid Architecture
-1. **Tier 1: Document Preprocessing & Layout Segmentation (Local Edge / GPU)**:
-   - **Dewarping & Deskewing**: Page binarization and perspective correction via OpenCV and DocTR.
-   - **Document Layout Analysis (DLA)**: YOLOv11-Doc / LayoutLMv3 fine-tuned on exam layouts to detect:
-     - Question bounding boxes (e.g., "שאלה 1", "1.b").
-     - Multi-column boundaries (left/right split lines or whitespace gutters).
-     - Margin notes and continuation pointers ("המשך בעמוד הבא").
-     - Strikethrough / crossed-out scribbles (to exclude discarded derivations from grading).
-   - **Reading Order DAG (Directed Acyclic Graph)**: Reconstruct the logical reading order based on RTL conventions for Hebrew multi-column structures (Right column first $\to$ Left column second), while preserving LTR mathematical derivation flow within blocks.
-
-2. **Tier 2: Primary VLM Transcription (Gemini 1.5 Pro / Flash)**:
-   - Slice the exam by segmented Question Regions of Interest (ROIs).
-   - Prompt the VLM with high-resolution image slices + system prompt enforcing strict bi-directional JSON output schema:
-     - `hebrew_text`: Clean Hebrew transcript.
-     - `math_latex`: Standard LaTeX equations for all mathematical expressions.
-     - `raw_interleaved_markdown`: Native markdown with embedded `$...$` and `$$...$$` blocks.
-     - `confidence_score`: Self-estimated transcription confidence per segment.
-     - `ambiguities`: Array of flagged words/symbols where handwriting is illegible or indeterminate.
-
-3. **Tier 3: Secondary Cross-Validation (GPT-4o)**:
-   - Triggered when Gemini confidence is borderline ($0.70 \le C < 0.85$) or when mathematical syntax in LaTeX fails AST parsing (via KaTeX / SymPy).
-   - Cross-verifies equation ASTs to eliminate transcription hallucinations.
-
----
-
-### 1.2 Semantic & Flexible Grading Engine
-
-#### The "Diversity of Solutions" Challenge
-In academic STEM exams, a single problem may have 3–5 fundamentally different valid solution methods (e.g., solving an ODE using Laplace transforms vs. characteristic equations; physics problems solved via energy conservation vs. Newton's equations; proofs solved directly vs. by contradiction). Strict string matching or step-by-step keyword matching fails catastrophically.
-
-#### Architecture of the Flexible Grading Engine
-
-```mermaid
-graph TD
-    A[Instructor Master Solution & Scoring Key] --> B[Rubric Normalizer & Atomic Milestone Extractor]
-    B --> C[(Atomic Rubric Graph)]
-    
-    D[Student Question Transcription JSON+LaTeX] --> E[Method Classifier & Canonical Formatter]
-    E --> F[Symbolic AST Validator SymPy / CAS Engine]
-    
-    C --> G[Agentic Evaluator Multi-Agent Debate]
-    F --> G
-    
-    G --> H[Milestone Matcher Alternative Path Mapper]
-    H --> I[Error Propagation 'נגרר' Handler]
-    I --> J[Itemized Score & Pedagogical Justification]
-```
-
-1. **Rubric Decomposition (Atomic Rubric Graph - ARG)**:
-   - Convert the instructor's solution into an Atomic Rubric:
-     - **Milestones**: Discrete conceptual goals (e.g., "Identified boundary condition $y(0)=0$ [2 pts]", "Correctly applied integration by parts [3 pts]", "Derived final expression [2 pts]").
-     - **Equivalent Paths**: Pre-computed alternative paths (e.g., Path A: Direct Integration; Path B: Substitution $u = \tan(x/2)$).
-     - **Negative Rubrics**: Specific penalty deductions for known misconceptions.
-     - **Error Propagation Rules ("נגרר" / Consequential Error)**: If an arithmetic error occurs in Step 1 (e.g., $2 \times 3 = 5$, docking 1 pt), subsequent steps executed correctly based on the erroneous intermediate value $5$ receive **full conceptual credit**.
-
-2. **Multi-Agent Evaluation Loop**:
-   - **Agent 1: Mathematical Equivalence Checker (Symbolic + LLM)**:
-     - Parses student mathematical steps into SymPy / CAS ASTs.
-     - Computes algebraic simplification ($f_{student}(x) - f_{rubric}(x) \equiv 0$) to verify equivalent forms without penalizing unsimplified yet correct answers.
-   - **Agent 2: Pedagogical Rubric Matcher**:
-     - Maps the student's solution steps to the Atomic Rubric Milestones, irrespective of order or novel methodology.
-   - **Agent 3: Adversarial Grading Auditor (Consistency & Fairness)**:
-     - Validates that deductions match the point rubric, verifies that partial credit is equitable across the student cohort, and ensures Hebrew feedback is polite, constructive, and precise.
-
----
-
-### 1.3 Independent Plagiarism & Collusion Detection Module
-
-#### Decoupled Architecture
-Plagiarism detection must run independently of individual grading to prevent bias. It is executed as a cohort-wide batch job after all exams for a specific test are digitized.
-
-```mermaid
-graph LR
-    A[All Transcribed Student Submissions] --> B[Module 1: Semantic & N-Gram Embeddings BGE-M3]
-    A --> C[Module 2: Derivation Graph Isomorphism Step DAG]
-    A --> D[Module 3: Idiosyncratic Error Fingerprinting]
-    
-    B --> E[Multi-Modal Similarity Fusion Matrix]
-    C --> E
-    D --> E
-    
-    E --> F[Louvain Community Clustering & Anomaly Ranker]
-    F --> G[Instructor Collusion Inspection Report]
-```
-
-1. **Layer 1: Structural & Textual Semantic Similarity**:
-   - Transcripts are embedded using multi-lingual dense vector models (e.g., `BAAI/bge-m3` or `text-embedding-3-large`).
-   - Pairwise cosine similarity matrix computed across all student pairs per question.
-   - Fast LSH (Locality Sensitive Hashing) / MinHash used for near-duplicate n-gram and sentence structure matching.
-
-2. **Layer 2: Derivation Graph Isomorphism (Math Step Matching)**:
-   - Each student's mathematical steps are parsed into a sequence of canonical equation representations.
-   - Computes Graph Edit Distance (GED) and longest common subsequence (LCS) of mathematical operations.
-   - Detects when two students use identical variable naming conventions or peculiar algebraic rearrangements that deviate from the master solution.
-
-3. **Layer 3: Idiosyncratic Error & Artifact Fingerprinting (The "Smoking Gun")**:
-   - Independent identical correct answers are normal. Independent identical **bizarre, non-standard errors** are statistical anomalies indicating copying.
-   - Algorithmic anomaly detector isolates:
-     - Identical wrong arithmetic operations (e.g., both wrote $7 \times 8 = 54$).
-     - Identical non-standard variable names (e.g., using $\xi$ or an arbitrary substitution $k_7$).
-     - Shared geometric drawing layout peculiarities.
-   - Calculates a **Collusion Confidence Score** ($P_{copy} \in [0, 100\%]$) with mathematical justification for instructor review.
-
----
-
-### 1.4 Confidence & Fallback Logic (Human-in-the-Loop - HITL)
-
-The system computes an aggregate **Confidence Index** $S_{conf}$ for every question:
-
-$$S_{conf} = w_1 C_{ocr} + w_2 C_{layout} + w_3 C_{eval} + w_4 C_{symbolic}$$
-
-Where:
-- $C_{ocr}$: VLM transcription token log-probabilities and legibility metrics.
-- $C_{layout}$: Document segmentation stability (absence of overlapping blocks or ambiguous margin arrows).
-- $C_{eval}$: Evaluation consensus score between grading agents.
-- $C_{symbolic}$: Deterministic CAS proof verification score.
-
-#### Dynamic Routing Tiers
-
-```mermaid
-graph TD
-    A[Graded Question Result] --> B{S_conf Threshold}
-    B -- ">= 0.88 (Tier 1: High)" --> C[Auto-Finalized Grade Recorded]
-    B -- "0.72 <= S_conf < 0.88 (Tier 2: Medium)" --> D[Rapid Review Queue 10s Verification]
-    B -- "< 0.72 (Tier 3: Low)" --> E[Full HITL Inspection Side-by-Side UI]
-    
-    D --> F[Instructor Action: Confirm / Modify]
-    E --> F
-    F --> G[(Active Learning Fine-Tuning Corpus)]
-```
-
-- **Tier 1 (High Confidence $\ge 0.88$)**: Immediate automated grading, full feedback generated.
-- **Tier 2 (Medium Confidence $0.72 - 0.87$)**: "One-Click Quick Verification". Displayed to the instructor with highlighted uncertainty points (e.g., "Confirm if student wrote $x_1$ or $x_2$").
-- **Tier 3 (Low Confidence $< 0.72$)**: Full manual fallback. The original scan crop is shown side-by-side with the candidate transcription, and the instructor can either edit the text or grade directly.
-
----
-
-## 2. Comprehensive Phased Execution Plan
-
-### Phase 1: Architecture, Infrastructure & Data Preprocessing Pipeline
-- **Core Objectives**: Establish secure, scalable cloud infrastructure, document intake pipeline, and image normalization microservice capable of handling raw, skewed, low-contrast, or mobile-scanned student exam papers.
-- **Technical Deliverables**:
-  - Cloud infrastructure (FastAPI backend, PostgreSQL with pgvector, Redis task queue, S3/GCS encrypted document storage).
-  - Document Preprocessing Service: Auto-cropping, perspective correction, contrast enhancement (CLAHE), deskewing, and high-DPI scaling.
-  - Anonymization engine: Automated redaction/masking of student identity headers before grading to eliminate evaluation bias.
-- **Edge Cases & Risk Mitigation**:
-  - *Edge Case*: Mobile phone camera photos with heavy shadows, perspective distortion, and uneven lighting.
-  - *Mitigation*: OpenCV adaptive thresholding, homography-based perspective rectification using detected page borders.
-
-### Phase 2: Multi-Column Layout Analysis & Bi-Directional Hebrew-Math VLM Transcription
-- **Core Objectives**: Implement reliable layout parsing that disentangles multi-column student answers, handles Hebrew RTL text alongside LTR mathematics, and outputs structured canonical JSON with LaTeX representations.
-- **Technical Deliverables**:
-  - DLA module: Fine-tuned YOLOv11-Doc / LayoutLMv3 for bounding box detection of question numbers, sub-questions, answers, and strikethroughs.
-  - Topological Reading Order Sorter: Graph algorithm reconstructing RTL column sequence while maintaining LTR formula blocks.
-  - VLM Transcription Pipeline: Production prompts and client wrappers for Gemini 1.5 Pro / Flash with structured output schemas.
-  - Fallback OCR verification pipeline for mathematical AST validation via KaTeX/SymPy.
-- **Edge Cases & Risk Mitigation**:
-  - *Edge Case*: Student splits a single page into 3 informal vertical columns and adds an arrow pointing from Column 3 back to the top of Column 1.
-  - *Mitigation*: Arrow and visual flow-line detection in the layout model; explicit prompt instruction for the VLM to follow visual callout pointers.
-  - *Edge Case*: Hebrew characters identical to mathematical symbols (e.g., Hebrew letter 'ח' vs mathematical symbol '$\sqcap$', or 'צ' vs '$y$').
-  - *Mitigation*: Context-aware bi-directional language modeling; vocabulary constraint masks separating mathematical environments (`$...$`) from textual prose.
-
-### Phase 3: Semantic Grading Engine, Rubric Decomposition & Symbolic Reasoning
-- **Core Objectives**: Develop an automated grading engine that evaluates solutions against the instructor's key with full semantic flexibility for diverse, alternative, or creative problem-solving methods, complete with error propagation handling.
-- **Technical Deliverables**:
-  - Master Solution Ingestion Parser: Deconstructs the instructor's PDF/Word solution into an Atomic Rubric Graph (milestones, weights, alternatives, negative penalties).
-  - Symbolic CAS Evaluation Engine (SymPy / Math Engine API) for algebraic equivalence checking.
-  - Multi-Agent Grading Core (Method Classifier $\to$ Milestone Rubric Matcher $\to$ Error Propagation Auditor $\to$ Hebrew Feedback Generator).
-  - Confidence scoring calculation engine ($S_{conf}$).
-- **Edge Cases & Risk Mitigation**:
-  - *Edge Case*: A student uses a valid, high-level university method (e.g., Green's Theorem) for a problem intended to be solved with basic line integrals.
-  - *Mitigation*: The Symbolic Engine validates that the mathematical conclusions and boundary relations are sound; the grading agent checks if the syllabus explicitly forbade alternative theorems; if not prohibited, awards full credit.
-  - *Edge Case*: Cascade/Error Propagation: An arithmetic slip in sub-step (a) changes numerical values for sub-steps (b) and (c).
-  - *Mitigation*: Consequential Error ("נגרר") Rule Engine recalculates subsequent milestones using the student's erroneous intermediate value; if the derivation logic is 100% correct, full partial credit is awarded.
-
-### Phase 4: Decoupled Plagiarism & Collusion Detection Engine
-- **Core Objectives**: Build an independent batch analysis pipeline that detects copying, collusion, and unauthorized collaboration across student exam submissions.
-- **Technical Deliverables**:
-  - Pairwise similarity matrix generator using BGE-M3 embeddings.
-  - Mathematical Derivation Graph Isomorphism detector.
-  - Anomaly detection engine for shared idiosyncratic errors, identical arithmetic mistakes, and unique notation fingerprints.
-  - Louvain community detection algorithm to cluster suspected collusion rings.
-  - Instructor-facing Evidence Dossier: Side-by-side visual diffs highlighting identical lines and statistical probability metrics.
-- **Edge Cases & Risk Mitigation**:
-  - *Edge Case*: Two students both solve a standard problem using the single standard textbook proof, producing high similarity.
-  - *Mitigation*: Exclude standard correct solution paths from anomaly scores; weight similarity heavily by *abnormal* variations, non-standard variable choices, and *shared incorrect steps*.
-
-### Phase 5: Instructor Dashboard, HITL Review Interface & Analytics
-- **Core Objectives**: Provide a responsive, modern web dashboard for instructors to review grades, inspect low-confidence scans, adjudicate flagged copying, and visualize aggregate exam analytics.
-- **Technical Deliverables**:
-  - Human-in-the-Loop (HITL) Verification Workbench: Split-screen UI showing original handwritten scan crops alongside transcribed LaTeX and suggested grades, with one-click adjustments.
-  - Global Exam Analytics Engine:
-    - Item Response Theory (IRT) difficulty and discrimination index calculation per question.
-    - Common Misconception Clustering: Unsupervised grouping of errors to report "Where the class struggled" (e.g., "48% of students lost points in Q3 due to missing integration constant $+C$").
-    - Grade distribution curves, standard deviation, and anomaly alerts.
-  - Export system: LMS gradebook sync (Moodle, Canvas, Blackboard) and detailed PDF student grade reports in Hebrew.
-- **Edge Cases & Risk Mitigation**:
-  - *Edge Case*: Instructor overrides AI grades repeatedly for a specific question.
-  - *Mitigation*: The system detects repeated manual adjustments, automatically prompts the instructor to update the Atomic Rubric, and re-evaluates the remaining cohort papers based on the revised criteria.
-
-### Phase 6: System Integration, Security, Stress Testing & Deployment
-- **Core Objectives**: End-to-end integration, performance profiling, security hardening (FERPA/GDPR compliance for student data), and production deployment.
-- **Technical Deliverables**:
-  - End-to-End automated testing suite (synthetic handwritten exam generator + historical exam benchmark dataset).
-  - Asynchronous worker scaling (Celery/Temporal workers on Kubernetes with GPU autoscaling).
-  - Security suite: End-to-end encryption at rest (AES-256) and in transit (TLS 1.3), student PII anonymization, audit logs.
-  - Comprehensive documentation, deployment Helm charts, and instructor onboarding guides.
-- **Edge Cases & Risk Mitigation**:
-  - *Edge Case*: High-volume submission spike (e.g., 500 students submitting 8-page exams simultaneously after finals = 4,000 pages).
-  - *Mitigation*: Decoupled async job architecture with Redis queue, rate-limited batching for VLM API endpoints, and prioritized queueing (fast OCR first, background plagiarism detection second).
-
----
-
-## 3. Master To-Do Checklist
-
-### Phase 1: Architecture, Infrastructure & Data Pipeline
-- [ ] **Infrastructure & Environment Setup**
-  - [ ] Initialize Git repository with monorepo structure (`/backend`, `/frontend`, `/ml-pipeline`, `/docs`)
-  - [ ] Set up Docker & Docker Compose development environment
-  - [ ] Configure PostgreSQL database with `pgvector` extension for embeddings
-  - [ ] Deploy Redis instance for task queueing and caching
-  - [ ] Set up S3-compatible encrypted object storage (MinIO / AWS S3) for raw scans
-  - [ ] Establish CI/CD pipelines (GitHub Actions) with automated linting and unit tests
-- [ ] **Document Intake & Preprocessing Microservice**
-  - [ ] Implement multi-page PDF and multi-image TIFF/JPEG ingestion endpoint
-  - [ ] Build automatic page dewarping and perspective rectification (OpenCV / DocTR)
-  - [ ] Implement CLAHE adaptive contrast enhancement for light pencil / messy ink
-  - [ ] Build auto-deskewing algorithm based on Hough transform and projection profiles
-  - [ ] Implement automated student ID header detection and anonymization masking module
-  - [ ] Create unit tests for image preprocessing under simulated bad lighting and rotation
-
----
-
-### Phase 2: Layout Parsing & Bi-Directional Transcription (Hebrew + Math)
-- [ ] **Multi-Column Document Layout Analysis (DLA)**
-  - [ ] Assemble and label a benchmark dataset of multi-column handwritten Hebrew STEM exams
-  - [ ] Train/Fine-tune YOLOv11-Doc / LayoutLMv3 for bounding box segmentation:
-    - [ ] Question header labels ("שאלה", "סעיף")
-    - [ ] Work blocks and multi-column divisions
-    - [ ] Marginal notes and continuation annotations
-    - [ ] Strikethrough and scratched-out scribble regions
-  - [ ] Develop Topological Reading Order DAG algorithm (RTL column flow + LTR math blocks)
-  - [ ] Implement polygon crop extraction with margin preservation
-- [ ] **VLM Transcription Engine**
-  - [ ] Configure API client integrations with retry/backoff for Gemini 1.5 Pro, GPT-4o, and Claude 3.5
-  - [ ] Design structured bi-directional transcription prompts:
-    - [ ] Output schema: `{ hebrew_text, math_latex, interleaved_md, confidence, flagged_tokens }`
-    - [ ] Few-shot examples of mixed Hebrew handwriting and complex formulas (integrals, matrices, fractions)
-  - [ ] Implement LaTeX AST validation using KaTeX / SymPy to detect broken mathematical syntax
-  - [ ] Build dual-VLM cross-verification fallback mechanism for low-confidence text segments
-  - [ ] Develop test suite benchmarking character error rate (CER) and math formula accuracy
-
----
-
-### Phase 3: Semantic Grading Engine & Flexible Reasoning
-- [ ] **Master Solution & Rubric Normalization**
-  - [ ] Create instructor input parser for master solution PDF/LaTeX files
-  - [ ] Implement LLM-powered Rubric Decomposition into Atomic Rubric Graph (ARG):
-    - [ ] Milestone nodes with designated point allocations
-    - [ ] Allowable alternative derivation paths
-    - [ ] Consequential error ("נגרר") tracking rules
-    - [ ] Negative penalty tags (common misconceptions)
-  - [ ] Build instructor UI for reviewing and modifying generated atomic rubrics
-- [ ] **Multi-Agent Evaluation Core**
-  - [ ] Implement Method Classifier Agent to identify student's chosen problem-solving strategy
-  - [ ] Integrate SymPy / Computer Algebra System (CAS) for exact symbolic equivalence checking
-  - [ ] Build Milestone Matcher Agent for mapping student steps to atomic rubric criteria
-  - [ ] Develop Error Propagation ("נגרר") Engine to preserve partial credit on downstream steps
-  - [ ] Implement Adversarial Auditor Agent to check consistency and prevent hallucinated grades
-  - [ ] Implement Hebrew Pedagogical Feedback Generator with concise, supportive error explanations
-  - [ ] Build composite Confidence Calculation Engine ($S_{conf}$) combining OCR, layout, and evaluation scores
-
----
-
-### Phase 4: Independent Plagiarism & Collusion Detection
-- [ ] **Vector & Structural Similarity Pipeline**
-  - [ ] Integrate multilingual dense embedding model (`BAAI/bge-m3` / `text-embedding-3-large`)
-  - [ ] Build vector indexing and pairwise cosine similarity calculation per question
-  - [ ] Implement MinHash/LSH near-duplicate n-gram string matcher
-- [ ] **Mathematical Derivation Graph Isomorphism**
-  - [ ] Build formula AST parser converting LaTeX sequences into derivation step graphs
-  - [ ] Implement Graph Edit Distance (GED) and Longest Common Subsequence of math steps
-  - [ ] Detect shared unique variable naming and unusual algebraic rearrangements
-- [ ] **Idiosyncratic Error Fingerprinting & Clustering**
-  - [ ] Build anomaly detector for shared non-standard incorrect calculations
-  - [ ] Implement statistical anomaly scoring filter (distinguishing common slips from unique copies)
-  - [ ] Implement Louvain community detection algorithm to group suspicious collusion clusters
-  - [ ] Build automated Evidence Dossier generator with highlighted side-by-side visual diffs
-
----
-
-### Phase 5: Instructor Dashboard & HITL Interface
-- [ ] **Human-in-the-Loop (HITL) Review Workbench**
-  - [ ] Build interactive split-screen review UI (original scan crop vs. transcription + grade)
-  - [ ] Create rapid "One-Click Approve" interface for medium-confidence questions
-  - [ ] Implement inline LaTeX editor and score adjustment controls for instructors
-  - [ ] Implement audit trail logging all instructor overrides for active learning feedback
-- [ ] **Analytics & Global Difficulty Dashboard**
-  - [ ] Build question-level score distribution charts and box plots
-  - [ ] Implement Item Response Theory (IRT) difficulty and discrimination parameter calculations
-  - [ ] Develop Unsupervised Error Clustering for thematic "Global Difficulty" insights
-  - [ ] Create Class Mastery Heatmap by curriculum topics and competencies
-  - [ ] Build export connectors for LMS platforms (Moodle, Canvas) and student PDF scorecards
-
----
-
-### Phase 6: System Integration, Security & Production Deployment
-- [ ] **Testing & Quality Assurance**
-  - [ ] Curate an end-to-end evaluation dataset of 200+ real handwritten exam pages with ground truth
-  - [ ] Perform stress testing with simulated concurrent batch uploads of 5,000+ pages
-  - [ ] Conduct adversarial testing (illegible handwriting, upside-down pages, multiple languages)
-- [ ] **Security, Privacy & Compliance**
-  - [ ] Ensure strict PII redaction and FERPA/GDPR student privacy compliance
-  - [ ] Implement role-based access control (RBAC) (Lead Instructor, Teaching Assistant, Auditor)
-  - [ ] Configure full disk encryption (AES-256) and TLS 1.3 transit encryption
-- [ ] **Deployment & Operations**
-  - [ ] Containerize services with Docker and write Kubernetes (EKS/GKE) manifests
-  - [ ] Configure Prometheus metrics collection and Grafana monitoring dashboards
-  - [ ] Set up automated backup and disaster recovery procedures for exam storage
-  - [ ] Deliver user documentation, instructor quick-start guide, and API documentation
-
----
-
-## 4. Key Open Decisions & Architectural Questions
-
-1. **VLM API vs. Private Self-Hosted Models**:
-   - *Option A (Recommended for Accuracy)*: Cloud Frontier APIs (Gemini 1.5 Pro / GPT-4o). Highest accuracy on Hebrew handwriting + math; zero infrastructure maintenance; enterprise zero-data-retention agreements.
-   - *Option B (Recommended for Strict On-Prem Air-Gapped Compliance)*: Self-hosted fine-tuned open-weights models (e.g. Qwen2-VL-72B or hybrid TrOCR + Llama-3.3-70B on local GPU clusters). Requires significant GPU resources (multi-A100/H100) and upfront fine-tuning.
-2. **LMS Integration Depth**:
-   - Should the initial release focus on standalone CSV/Excel export or direct bidirectional LTI 1.3 / REST integration with Moodle and Canvas?
-3. **Instructor Feedback Language**:
-   - Confirm whether student feedback should be generated strictly in Hebrew, or if English/bilingual options are required for international or English-medium degree programs.
+1. **Scan quality standard.** Flatbed 300 DPI or phone photographs? This materially changes achievable CER and should be settled with Phase 0 evidence, then imposed as a requirement on the instructor.
+2. **Cross-check coverage.** Dual-model transcription on every page, or only where the primary signals low confidence? Roughly doubles transcription cost; Phase 5 calibration data decides.
+3. **Autonomy ceiling.** Does the instructor ever want auto-finalised grades (R2), or is assistive review of every question (R1) the permanent operating mode? Affects how hard Phase 5 calibration must be pushed.
+4. **Feedback language.** Hebrew only, or bilingual for English-medium programmes?
+5. **Retention.** How long are scans, transcripts, and evidence dossiers kept after grades are released, and who may access them during an appeal window?

@@ -4,8 +4,15 @@ uvicorn>=0.30.0
 pydantic>=2.8.0
 pydantic-settings>=2.4.0
 python-multipart>=0.0.9
+jinja2>=3.1.4
 
-# Computer Vision & Preprocessing
+# Persistence
+sqlalchemy>=2.0.30
+alembic>=1.13.0
+
+# Document Intake & Preprocessing
+PyMuPDF>=1.24.0          # PDF rasterisation for multi-page exam scans
+                         # import as `pymupdf`; the legacy `fitz` name is deprecated
 opencv-python>=4.10.0
 Pillow>=10.4.0
 numpy>=1.26.0
@@ -17,10 +24,28 @@ scipy>=1.14.0
 scikit-learn>=1.5.0
 
 # LLM & VLM Providers
-openai>=1.40.0
+# NOTE: pin exact model version IDs in .env, never the "-latest" aliases.
+# A mid-cohort re-point means students were graded by different models.
+google-genai>=1.0.0      # primary VLM (Gemini 3.x)
+openai>=1.40.0           # independent cross-check model
 httpx>=0.27.0
 requests>=2.32.0
+tenacity>=8.5.0          # retry/backoff for provider rate limits and outages
 
-# Testing & Utilities
-python-dotenv>=1.0.1
+# Plagiarism & Collusion Detection
+networkx>=3.3            # derivation graphs, graph edit distance, clustering
+datasketch>=1.6.5        # MinHash / LSH near-duplicate detection
+
+# Reporting
+# Hebrew RTL prose interleaved with LaTeX is rendered by printing the same HTML
+# the review workbench serves, via headless Chromium. Requires a one-time
+# `playwright install chromium` after pip install.
+playwright>=1.45.0
+
+# Evaluation & Testing
+jiwer>=3.0.4             # character/word error rate for the Phase 0 gate
 pytest>=8.3.0
+pytest-asyncio>=0.23.0
+
+# Utilities
+python-dotenv>=1.0.1

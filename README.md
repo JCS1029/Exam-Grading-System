@@ -12,7 +12,7 @@ An enterprise-grade AI system that streamlines university-level STEM exam gradin
 
 1. **Bilingual Vision-Language Transcription (Hebrew + Complex Math)**
    - Transcribes handwritten Hebrew prose (Right-to-Left / RTL) seamlessly interleaved with mathematical formulas and matrices (Left-to-Right / LTR).
-   - Powered by Google Gemini 1.5 Pro / Flash with secondary validation via OpenAI GPT-4o.
+   - Powered by Google Gemini 3.x with independent cross-checking via OpenAI GPT-5.6, selected empirically in the Phase 0 model bake-off (see [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)).
    - Converts formulas directly into standard LaTeX.
 
 2. **Multi-Column Layout Analysis & Reading Order DAG**
