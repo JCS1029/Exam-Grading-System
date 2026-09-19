@@ -52,6 +52,7 @@ storage/reports/*
 !storage/processed/.gitkeep
 !storage/crops/.gitkeep
 !storage/reports/.gitkeep
+!storage/reports/phase0_review.html
 
 # Testing and Coverage
 .pytest_cache/
