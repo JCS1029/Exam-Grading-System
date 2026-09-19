@@ -52,7 +52,11 @@ storage/reports/*
 !storage/processed/.gitkeep
 !storage/crops/.gitkeep
 !storage/reports/.gitkeep
+!storage/crops/pilot/
+!storage/crops/pilot/*
 !storage/reports/phase0_review.html
+!storage/reports/phase0_results.json
+!storage/reports/phase0_decision_memo.md
 
 # Testing and Coverage
 .pytest_cache/
