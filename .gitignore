@@ -48,6 +48,13 @@ storage/uploads/*
 storage/processed/*
 storage/crops/*
 storage/reports/*
+storage/raw/*
+storage/preprocessed/*
+storage/anonymized/*
+storage/pseudonym_map.db
+!storage/raw/.gitkeep
+!storage/preprocessed/.gitkeep
+!storage/anonymized/.gitkeep
 !storage/uploads/.gitkeep
 !storage/processed/.gitkeep
 !storage/crops/.gitkeep
