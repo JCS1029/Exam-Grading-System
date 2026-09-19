@@ -6,37 +6,40 @@
 
 ---
 
-## Phase 0 — Model bake-off and feasibility
+## Phase 1 — Intake, Preprocessing, Booklet Reconciliation, & Anonymisation
 
-Nothing else gets built until this passes. The brief names Hebrew handwriting as the primary difficulty, and its answer determines the architecture of every stage downstream.
+- [ ] Multi-page PDF intake via PyMuPDF rasterisation at 300 DPI; direct JPEG/PNG/TIFF
+- [ ] Image Preprocessing:
+  - [ ] Deskew (Hough transform plus projection-profile refinement; target residual skew $\le 0.5^\circ$)
+  - [ ] Perspective rectification by page-border homography
+  - [ ] CLAHE adaptive contrast for faint pencil handwriting
+- [ ] Booklet reconciliation — detect anonymous booklet ID, validate page counts, detect short booklets
+- [ ] Anonymisation before egress: detect and mask identity header regions
 
-- [x] **Fix the broken configuration first**
-  - [x] Add `google-genai` to `requirements.txt` — the primary VLM had no SDK installed and could not be called at all
-  - [x] Replace the retired model IDs in `.env.example` and `.env` (`gemini-1.5-pro` was shut down 29 Sep 2025 and returns 404)
-  - [x] Add missing dependencies: `PyMuPDF`, `networkx`, `datasketch`, `jiwer`, `jinja2`, `playwright`, `sqlalchemy`, `alembic`, `tenacity`, `pytest-asyncio`
-  - [x] Install Chromium for PDF rendering (`playwright install chromium`) and confirm Hebrew RTL output renders
-  - [ ] Verify model availability with a live `models.list` call once `GEMINI_API_KEY` is set; pin exact version IDs; do not use `-latest` aliases
-- [ ] **Assemble the pilot set** (12–15 real handwritten pages, obtained with consent)
-  - [ ] At least 4 multi-column pages
-  - [ ] At least 2 pages with heavy strikethrough
-  - [ ] A deliberate spread of handwriting legibility
-- [ ] **Hand-produce ground truth** — Hebrew prose transcript plus LaTeX per formula (tedious, unavoidable, and the measuring stick for the whole project)
-- [ ] **Run the comparison**, recording cost and latency per page
-  - [ ] `gemini-3.1-pro-preview`
-  - [ ] `gemini-3.5-flash`
-  - [ ] `gpt-5.6-sol`
-  - [ ] A classical baseline (Tesseract-Hebrew or DocTR) to establish what the VLM actually buys
-- [ ] **Score prose and mathematics separately** — they fail differently and a blended number hides which half is broken
-  - [ ] Hebrew CER via `jiwer`, after NFC normalisation and niqqud stripping
-  - [ ] Formula exact-match after SymPy canonicalisation
-  - [ ] Rate of LaTeX that fails to parse at all, reported separately
-- [ ] **Test cheap multi-column handling** before assuming a layout model is needed: full page to the VLM with an OpenCV vertical projection profile as a gutter prior
-- [ ] **Project full-cohort cost** from measured per-page cost, not from published token prices (image inputs dominate)
-- [ ] **Write the decision memo** — numbers, chosen model pinned, and an explicit statement of what fails and why
+**Gate:** 100% pilot pages ingest without crash · residual skew $\le 0.5^\circ$ · identity masked before egress 100%.
 
-**Gate:** Hebrew CER ≤ 8% · formula exact-match ≥ 85% · LaTeX parses ≥ 95% · question regions located 100% · projected cost within budget.
+---
 
-**If the gate fails, stop and escalate** — require better scans, move to templated answer boxes, or narrow the question types. Building past a failed transcription gate produces a system that grades noise.
+## Phase 2 — Layout Analysis, Column Splitting, & Question Segmentation
+
+- [ ] Gutter & Multi-column detection (OpenCV vertical projection profile)
+- [ ] Question region & label detection (שאלה 1, סעיף א, etc.)
+- [ ] Table detection & grid extraction (cover score rosters)
+- [ ] Bounded question crop generation into `storage/crops/`
+
+**Gate:** Column gutter detection $\ge 95\%$ · question region recall $\ge 99\%$ · latency per crop < 8s.
+
+---
+
+## Phase 3 — VLM Feasibility Bake-Off & Transcription Pipeline
+
+- [ ] Transcribe segmented crops with candidate models (`gemini-3.5-flash`, `gemini-3.6-flash`)
+- [ ] Objective confidence scoring (reject self-reported 0.95 hallucinated confidence; evaluate SymPy parsing and cross-check)
+- [ ] Resilient API retry loop (`tenacity`) to eliminate 503 drops
+- [ ] Score Hebrew CER via `jiwer` and Math LaTeX parse rate via SymPy
+- [ ] Visual inspection and ground-truth comparison UI
+
+**Gate:** Hebrew CER $\le 8\%$ · Math formula parse $\ge 90\%$ · 0% unhandled 503 drops · full cohort cost < $25.
 
 ---
 

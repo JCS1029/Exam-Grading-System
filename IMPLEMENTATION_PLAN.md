@@ -57,90 +57,92 @@ Each phase has an **exit gate**: numeric criteria measured on held-out data. A p
 
 ---
 
-### Phase 0 — Model bake-off and feasibility (the risk-retirement phase)
+## 3. Phases
 
-The brief names Hebrew handwriting as the primary difficulty. Nothing gets built until it is measured, because the answer determines the architecture of everything downstream. This phase also produces the empirical model comparison the course report needs.
+Each phase has an **exit gate**: numeric criteria measured on held-out data. A phase is not finished when the code runs, it is finished when the gate passes.
+
+---
+
+### Phase 1 — Intake, Preprocessing, Booklet Reconciliation, & Anonymisation
+
+**Rationale:** Raw mobile scans and multi-page exam PDFs suffer from tilt, low contrast, and varied resolutions. Furthermore, booklet pages must be attributed to the correct student and anonymised before any cloud egress.
 
 **Work**
 
-- Collect a pilot set: 12–15 real handwritten exam pages, deliberately including at least 4 multi-column pages, 2 pages with heavy strikethrough, and a range of handwriting legibility. Obtain them with consent, from a past course if possible.
-- Hand-produce ground truth for the pilot set: Hebrew prose transcript plus LaTeX per formula. This is tedious and unavoidable; it is the measuring stick for the entire project.
-- Transcribe the pilot set with each candidate and record cost and latency per page:
-  - `gemini-3.1-pro-preview` — strongest spatial and multimodal reasoning
-  - `gemini-3.5-flash` — the cheap high-volume tier
-  - `gpt-5.6-sol` — independent second opinion, and the cross-check candidate
-  - one classical baseline (Tesseract Hebrew, or DocTR) to quantify how much the VLM is actually buying
-- Score Hebrew prose and mathematics **separately**. They fail in different ways and a blended number hides which half is broken.
-  - Hebrew prose: character error rate via `jiwer`, after Unicode NFC normalisation and stripping niqqud.
-  - Mathematics: exact match of the SymPy-canonicalised expression; report separately the rate of LaTeX that fails to parse at all.
-- Test the cheap multi-column approach before assuming a layout model is needed: full page to the VLM requesting question regions and reading order, with an OpenCV vertical projection profile supplied as a gutter prior.
-- Measure cost per page on the real pilot, then extrapolate to full-cohort cost. Do not estimate this from published per-token prices alone; high-resolution image inputs dominate and the multiplier is easy to get wrong by an order of magnitude.
+- Multi-page PDF and image intake (PyMuPDF rasterisation at configurable 300 DPI; JPEG/PNG/TIFF direct).
+- **Image Preprocessing**:
+  - Deskew via Hough transform plus projection-profile refinement (target residual skew $\le 0.5^\circ$).
+  - CLAHE adaptive contrast enhancement for faint pencil handwriting.
+  - Page-border homography perspective rectification.
+- **Booklet reconciliation & Anonymisation**:
+  - Anonymous booklet ID detection from header fields or barcodes.
+  - Page count validation per booklet.
+  - Identity region detection and local masking before any image leaves the machine.
 
 **Exit gate**
 
 | Metric | Threshold |
 | :--- | :--- |
-| Hebrew prose CER, best model | ≤ 8% (aim ≤ 5%) |
-| Formula exact-match after canonicalisation | ≥ 85% |
-| LaTeX that parses under SymPy/KaTeX | ≥ 95% |
-| Question regions located on pilot set | 100% recall — a missed question must never become a silent zero |
-| Full-cohort cost projection | within the project's API budget |
-
-**Deliverable:** a decision memo with the numbers, the chosen model pinned to an exact version ID, and a written statement of what fails and why.
-
-**If the gate fails:** stop and escalate rather than proceeding. Options in order of preference — require better scan quality (300 DPI flatbed rather than phone photos), restrict to printed-answer templates with defined answer boxes, or narrow to a question type with less free-form Hebrew prose. Proceeding past a failed transcription gate produces a system that grades noise.
+| Pilot pages ingested and preprocessed without crash | 100% |
+| Residual skew after correction | $\le 0.5^\circ$ |
+| Identity regions masked before cloud egress | 100% (zero exceptions) |
+| Booklet mis-attribution on test set | 0 silent errors; every anomaly halted |
 
 ---
 
-### Phase 1 — Intake, booklet reconciliation, preprocessing, anonymisation
+### Phase 2 — Layout Analysis, Column Splitting, & Question Segmentation
+
+**Rationale:** Empirical evidence from full-page VLM tests showed that sending unsegmented, multi-column handwritten pages directly to a VLM results in scrambled reading order, 35s+ latency, and 503 timeouts. Segmentation into isolated question and column crops is mandatory *before* transcription.
 
 **Work**
 
-- Multi-page PDF and image intake (PDF via PyMuPDF rasterisation at configurable DPI; JPEG/PNG/TIFF direct).
-- **Booklet reconciliation.** This is the highest-consequence correctness problem in the system and it is not glamorous: pages must be attributed to the right student. Implement anonymous booklet ID detection from the exam's ID field or barcode, validate the page count per booklet against the expected count, and reconcile the booklet set against the course roster. Any unmatched page, duplicate ID, or short booklet **halts that booklet and raises it to the instructor**. Silent mis-attribution gives a student someone else's grade, and no downstream accuracy metric will catch it.
-- Deskew via Hough transform plus projection-profile refinement; perspective rectification by page-border homography.
-- CLAHE adaptive contrast for faint pencil.
-- **Anonymisation before any external API call.** Detect and mask the identity header region, assign a pseudonym, and store the pseudonym↔student mapping in a separate local table that never leaves the machine. This serves two purposes: privacy compliance, and removing identity bias from grading — which is also what makes the independent copy-detection stage credible.
+- **Gutter & Multi-column Detection**:
+  - OpenCV vertical projection profiles and connected-component gutters to divide multi-column layouts into discrete vertical reading bands.
+- **Question Region Segmentation**:
+  - Detect question delimiters, problem labels (e.g. שאלה 1, סעיף א), and bounded answer areas.
+  - Table vs. Free-form classification (e.g. detecting exam summary score grids like `test3sol` page 1).
+- **Sub-Region Cropping**:
+  - Extract isolated image crops for each question / column / table section and save them with spatial bounding coordinates.
+  - Filter out full-page margins and blank areas to drastically reduce VLM token counts and latency.
 
 **Exit gate**
 
 | Metric | Threshold |
 | :--- | :--- |
-| Pilot pages ingested without crash | 100% |
-| Residual skew after correction | ≤ 0.5° |
-| Identity regions masked before egress | 100% — hard gate, zero exceptions |
-| Booklet mis-attribution on a deliberately shuffled/short-booklet test set | 0 silent errors; every case halted and surfaced |
+| Column gutter detection on multi-column pages | $\ge 95\%$ |
+| Question region recall on pilot exam set | $\ge 99\%$ |
+| Latency reduction per crop vs full page | $\ge 70\%$ reduction (< 8s per crop) |
 
 ---
 
-### Phase 2 — Layout, multi-column reading order, transcription
+### Phase 3 — VLM Feasibility Bake-off & Transcription Pipeline
 
-The brief's second stated difficulty. The key realisation: because grading is per-question, a globally perfect reading order is not required — reliable **question-level segmentation** is. That is a much easier target.
+**Rationale:** Run transcription on the preprocessed, segmented crops produced by Phases 1 and 2. This measures true handwriting accuracy, formula parsing, and cost on bounded, clean inputs without cross-column scrambling.
 
 **Work**
 
-- Question segmentation: VLM identifies question and sub-question regions from the full page; OpenCV vertical projection profile detects column gutters and is passed as a prior.
-- **Coverage validation.** Cross-check detected question IDs against the question list parsed from the instructor's exam. Distinguish three states that must never be conflated: *answered*, *deliberately left blank* (legitimately zero), and *not found by the system* (a system failure requiring review). Collapsing the last two into a zero is a silent grading bug that harms students.
-- Reading-order resolution within a question: right column before left for Hebrew prose, left-to-right preserved inside mathematical blocks, with visual continuation arrows followed.
-- Strikethrough and scratch-work exclusion, so discarded derivations are not graded.
-- Transcription to the canonical schema: `hebrew_text`, `math_latex[]`, `interleaved_markdown`, `flagged_tokens[]`, plus the raw model response retained for audit.
-- LaTeX validation through SymPy/KaTeX; parse failure triggers re-transcription of that region, then cross-model check.
+- Transcribe bounded question crops using candidate models (`gemini-3.5-flash`, `gemini-3.6-flash`, with `gemini-3.1-pro` when quota allows).
+- **Objective (Calibrated) Quality Metrics**:
+  - Do NOT rely on self-reported model confidence (which hallucinates 0.95 on scrambled text).
+  - Score Hebrew prose CER via `jiwer` against ground truth.
+  - Validate all mathematical expressions through SymPy parsing.
+  - Detect strikethrough/crossed-out regions to exclude them from grading.
+- Resilient API architecture: `tenacity` exponential backoff retry loop for 503/429 transient errors.
+- Side-by-side visual verification tool (`storage/reports/phase0_review.html`) for instructor inspection.
 
 **Exit gate**
 
-Measured on a fresh held-out set, not the Phase 0 pilot.
-
 | Metric | Threshold |
 | :--- | :--- |
-| Question segmentation recall / precision | ≥ 99% / ≥ 95% |
-| Reading order correct on multi-column pages | ≥ 95% |
-| Crossed-out regions correctly excluded | ≥ 90% |
-| CER regression vs. Phase 0 | ≤ 2 percentage points |
-| Unanswered vs. not-found correctly distinguished | 100% |
+| Hebrew prose CER on segmented crops | $\le 8\%$ |
+| Formula exact-match / SymPy parse rate | $\ge 90\%$ |
+| Reading order correct on segmented columns | $\ge 98\%$ |
+| Unhandled 503 / dropped request rate | 0% (handled via retries) |
+| Projected full cohort cost | within budget (< $25 total) |
 
 ---
 
-### Phase 3 — Grading engine: rubric, diversity, consequential error
+### Phase 4 — Grading engine: rubric, diversity, consequential error
 
 **Work**
 
@@ -170,7 +172,7 @@ The last two rows need purpose-built test sets: write out several genuinely diff
 
 ---
 
-### Phase 4 — Independent copy detection
+### Phase 5 — Independent copy detection
 
 Runs as a separate cohort-wide batch job on anonymised transcripts, after grading, with no access to grades. Independence is a requirement of the brief and also what keeps it from becoming circular.
 
@@ -194,7 +196,7 @@ Runs as a separate cohort-wide batch job on anonymised transcripts, after gradin
 
 ---
 
-### Phase 5 — Confidence calibration and human review
+### Phase 6 — Confidence calibration and human review
 
 **Work**
 
@@ -220,7 +222,7 @@ Runs as a separate cohort-wide batch job on anonymised transcripts, after gradin
 
 ---
 
-### Phase 6 — Instructor report and global difficulty diagnostics
+### Phase 7 — Instructor report and global difficulty diagnostics
 
 This is the brief's stated end goal, and the most common way projects like this fail is reaching it with no time left. The thin end-to-end slice in Phase 7's sequencing note exists to prevent exactly that.
 
@@ -243,7 +245,7 @@ This is the brief's stated end goal, and the most common way projects like this 
 
 ---
 
-### Phase 7 — Privacy, hardening, and supervised pilot
+### Phase 8 — Privacy, hardening, and supervised pilot
 
 The system now touches real student work, which imposes obligations independent of how well it grades.
 
