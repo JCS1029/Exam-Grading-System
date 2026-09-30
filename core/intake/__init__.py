@@ -3,7 +3,7 @@ Phase 1 — Intake, Preprocessing, Booklet Reconciliation & Anonymisation.
 
 Pipeline stages (run in order):
     1. rasterizer   — PDF / image → 300 DPI PNG pages
-    2. preprocessor — Deskew + CLAHE + border crop
+    2. preprocessor — Deskew + white-point clamp + CLAHE + border crop
     3. reconciler   — Page-count & booklet-ID validation
     4. anonymizer   — Identity masking + pseudonym mapping
 """

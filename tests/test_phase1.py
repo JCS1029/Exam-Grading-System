@@ -45,6 +45,7 @@ from core.intake.preprocessor import (
     preprocess_booklet,
     deskew,
     apply_clahe,
+    clamp_white_point,
     crop_borders,
 )
 from core.intake.reconciler import (
@@ -128,14 +129,27 @@ def rotated_image(tmp_dir, sample_image) -> Path:
 
 @pytest.fixture
 def faint_pencil_image(tmp_dir) -> Path:
-    """Create an image with very faint marks (simulating light pencil)."""
-    img = np.ones((2400, 1800, 3), dtype=np.uint8) * 245  # near-white
+    """Create an image with faint but real pencil marks (below the bleed band)."""
+    img = np.ones((2400, 1800, 3), dtype=np.uint8) * 252  # paper white
 
-    # Very faint lines
+    # Faint front-side pencil (~160–170): dark enough to survive white-point clamp
     for y in range(200, 2200, 100):
-        cv2.line(img, (100, y), (1700, y), (220, 220, 220), 2)
+        cv2.line(img, (100, y), (1700, y), (165, 165, 165), 2)
 
     path = tmp_dir / "faint_page.png"
+    cv2.imwrite(str(path), img)
+    return path
+
+
+@pytest.fixture
+def bleed_through_image(tmp_dir) -> Path:
+    """Paper with real ink, faint pencil, and near-white verso ghosts."""
+    img = np.ones((800, 600), dtype=np.uint8) * 252
+    img[80:140, 40:560] = 40     # real ink
+    img[200:260, 40:560] = 165   # faint front-side pencil
+    img[320:380, 40:560] = 230   # bleed-through ghost
+    img[440:500, 40:560] = 240   # lighter ghost
+    path = tmp_dir / "bleed_page.png"
     cv2.imwrite(str(path), img)
     return path
 
@@ -239,6 +253,47 @@ class TestPreprocessor:
         assert enhanced.shape == img.shape
         assert len(enhanced.shape) == 2  # still greyscale
 
+    def test_white_point_crushes_ghosts_preserves_ink(self, bleed_through_image):
+        """Near-white bleed-through is crushed; real ink and faint pencil stay."""
+        img = cv2.imread(str(bleed_through_image), cv2.IMREAD_GRAYSCALE)
+        clamped, stats = clamp_white_point(img)
+
+        assert stats["applied"]
+        assert stats["white_point_threshold"] >= 180
+        assert np.all(clamped[80:140, 40:560] == 40)
+        assert np.all(clamped[200:260, 40:560] == 165)
+        assert np.all(clamped[320:380, 40:560] == 255)
+        assert np.all(clamped[440:500, 40:560] == 255)
+
+    def test_white_point_skips_dark_page(self):
+        """Dark / non-paper pages are left untouched."""
+        img = np.full((200, 200), 120, dtype=np.uint8)
+        img[20:40, 20:180] = 30
+        clamped, stats = clamp_white_point(img)
+        assert not stats["applied"]
+        assert np.array_equal(clamped, img)
+
+    def test_preprocess_applies_white_point_before_clahe(
+        self, tmp_dir, bleed_through_image, monkeypatch
+    ):
+        """Pipeline records white-point clamp and still runs CLAHE."""
+        monkeypatch.setenv("STORAGE_ROOT", str(tmp_dir))
+        import core.intake.preprocessor as pp
+        pp.STORAGE_ROOT = tmp_dir
+        pp.RAW_STORAGE = tmp_dir / "raw"
+        pp.PREPROCESSED_STORAGE = tmp_dir / "preprocessed"
+
+        result = preprocess_page(bleed_through_image, "bleed_booklet", page_index=0)
+        assert result.ok, f"Preprocess failed: {result.errors}"
+        assert result.white_point_clamped
+        assert result.clahe_applied
+        assert result.metrics["clamped_frac"] > 0.0
+
+        out = cv2.imread(str(result.output_path), cv2.IMREAD_GRAYSCALE)
+        # Ghost band should have been wiped before CLAHE could boost it
+        ghost_region = out[320:380, 40:560]
+        assert int(np.median(ghost_region)) >= 250
+
     def test_border_crop_no_crash(self, sample_image):
         """Border crop runs without crashing on a clean image."""
         img = cv2.imread(str(sample_image))
@@ -258,6 +313,22 @@ class TestPreprocessor:
         assert result.ok, f"Preprocess failed: {result.errors}"
         assert Path(result.output_path).exists()
         assert result.clahe_applied
+        assert hasattr(result, "fixing_score")
+        assert isinstance(result.fixing_score, float)
+        assert "deskew_score" in result.metrics
+
+    def test_fixing_score_computation(self, rotated_image, tmp_dir, monkeypatch):
+        """Fixing score reflects severe skew and processing."""
+        monkeypatch.setenv("STORAGE_ROOT", str(tmp_dir))
+        import core.intake.preprocessor as pp
+        pp.STORAGE_ROOT = tmp_dir
+        pp.RAW_STORAGE = tmp_dir / "raw"
+        pp.PREPROCESSED_STORAGE = tmp_dir / "preprocessed"
+
+        result = preprocess_page(rotated_image, "skew_booklet", page_index=0)
+        assert result.ok
+        assert result.fixing_score > 0.0
+        assert result.metrics["deskew_score"] > 0.0
 
 
 class TestReconciler:

@@ -87,7 +87,7 @@ def run_phase1(
     # ── Step 2: Preprocess ────────────────────────────────────────────
     logger.info("")
     logger.info("=" * 60)
-    logger.info("STEP 2: Image Preprocessing (Deskew + CLAHE + Border Crop)")
+    logger.info("STEP 2: Image Preprocessing (Deskew + White-Point Clamp + CLAHE + Border Crop)")
     logger.info("=" * 60)
 
     all_preprocess_results: dict[str, list[PreprocessResult]] = {}

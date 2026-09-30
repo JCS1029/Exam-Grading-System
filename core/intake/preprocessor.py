@@ -1,10 +1,11 @@
 """
 Step 2 — Computer Vision Image Cleaning.
 
-Three sub-operations applied to every rasterised page:
+Sub-operations applied to every rasterised page:
     1. Deskew  — Hough-line angle detection → rotation correction (≤ 0.5° residual)
-    2. CLAHE   — Adaptive contrast enhancement for faint pencil strokes
-    3. Border crop — Perspective rectification to remove scanner borders
+    2. White-point clamp — crush near-white bleed-through ghosts before contrast boost
+    3. CLAHE   — Adaptive contrast enhancement for faint pencil strokes
+    4. Border crop — Perspective rectification to remove scanner borders
 
 Usage:
     from core.intake.preprocessor import preprocess_page, preprocess_booklet
@@ -15,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -38,6 +40,16 @@ PREPROCESSED_STORAGE: Path = STORAGE_ROOT / "preprocessed"
 MAX_ACCEPTABLE_SKEW_DEG: float = 0.5   # residual angle must be ≤ this
 MAX_CORRECTION_DEG: float = 15.0        # refuse to correct absurd angles
 
+# White-point clamp (bleed-through / show-through suppression)
+# Ghost strokes sit in the top ~15–20% of 8-bit gray (≈215–245) while paper is
+# ≈250–255 and front-side ink/pencil is ≈0–180. Crush that band to 255 *before*
+# CLAHE so local histogram equalisation cannot amplify the ghosts.
+PAPER_WHITE_PERCENTILE: float = 99.0
+BLEED_BAND_FRAC: float = 0.16          # 16% of 0–255 ≈ 41 gray levels below paper
+INK_SAFE_MAX: int = 180               # never modify real front-side strokes
+CLAMP_FLOOR: int = 215                # default crush threshold (user example)
+MIN_PAPER_WHITE: float = 230.0        # skip clamp on dark / non-paper pages
+
 # CLAHE
 CLAHE_CLIP_LIMIT: float = 2.0
 CLAHE_TILE_GRID: Tuple[int, int] = (8, 8)
@@ -60,8 +72,11 @@ class PreprocessResult:
     skew_detected_deg: float = 0.0
     skew_corrected: bool = False
     residual_skew_deg: float = 0.0
+    white_point_clamped: bool = False
     clahe_applied: bool = False
     border_cropped: bool = False
+    fixing_score: float = 0.0
+    metrics: dict = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
 
     @property
@@ -176,7 +191,79 @@ def deskew(image: np.ndarray) -> Tuple[np.ndarray, float, float]:
 
 
 # ---------------------------------------------------------------------------
-# 2. CLAHE contrast enhancement
+# 2. White-point clamp (bleed-through suppression)
+# ---------------------------------------------------------------------------
+def estimate_paper_white(gray: np.ndarray) -> float:
+    """
+    Estimate the paper background intensity.
+
+    Exam pages are dominated by paper, so a high percentile plus the histogram
+    peak in the bright band is a stable white-point.
+    """
+    p_hi = float(np.percentile(gray, PAPER_WHITE_PERCENTILE))
+    hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).ravel()
+    lo = int(max(MIN_PAPER_WHITE, min(p_hi - 20.0, 250.0)))
+    peak = int(np.argmax(hist[lo:256]) + lo)
+    return float(max(p_hi, peak))
+
+
+def clamp_white_point(image: np.ndarray) -> Tuple[np.ndarray, dict]:
+    """
+    Crush near-white bleed-through ghosts to pure white.
+
+    Identifies the paper white-point, then applies a hard threshold clamp
+    (with an identity LUT below the threshold) so anything lighter than the
+    bleed band — typically > 215 — becomes 255. Front-side ink/pencil at or
+    below ``INK_SAFE_MAX`` (180) is never modified.
+
+    Operates on the L channel in LAB so chroma is preserved. Must run
+    *before* CLAHE.
+    """
+    is_color = len(image.shape) == 3
+    if is_color:
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+        work = l_channel
+    else:
+        work = image
+
+    paper_white = estimate_paper_white(work)
+    stats = {
+        "paper_white": round(paper_white, 1),
+        "white_point_threshold": 0.0,
+        "clamped_frac": 0.0,
+        "applied": False,
+    }
+
+    if paper_white < MIN_PAPER_WHITE:
+        return image, stats
+
+    # Crush the top 15–20% of the grayscale range below paper white, but
+    # never drop the threshold into real-ink territory.
+    threshold = paper_white - (255.0 * BLEED_BAND_FRAC)
+    threshold = max(threshold, float(CLAMP_FLOOR), float(INK_SAFE_MAX))
+    if threshold >= paper_white:
+        threshold = max(float(INK_SAFE_MAX), paper_white - 8.0)
+
+    stats["white_point_threshold"] = round(float(threshold), 1)
+
+    lut = np.arange(256, dtype=np.uint8)
+    thr_i = int(np.clip(np.floor(threshold), 0, 255))
+    lut[thr_i:] = 255  # ≥ threshold → pure white
+
+    clamped = cv2.LUT(work, lut)
+    changed = int(np.count_nonzero(clamped != work))
+    stats["clamped_frac"] = round(changed / float(work.size), 4)
+    stats["applied"] = changed > 0
+
+    if is_color:
+        lab = cv2.merge([clamped, a_channel, b_channel])
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR), stats
+    return clamped, stats
+
+
+# ---------------------------------------------------------------------------
+# 3. CLAHE contrast enhancement
 # ---------------------------------------------------------------------------
 def apply_clahe(image: np.ndarray) -> np.ndarray:
     """
@@ -202,7 +289,7 @@ def apply_clahe(image: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# 3. Border / margin rectification
+# 4. Border / margin rectification
 # ---------------------------------------------------------------------------
 def crop_borders(image: np.ndarray) -> Tuple[np.ndarray, bool]:
     """
@@ -305,8 +392,9 @@ def preprocess_page(
     Apply the full preprocessing pipeline to a single page image.
 
     1. Deskew (straighten)
-    2. CLAHE (contrast boost)
-    3. Border crop (perspective rectification)
+    2. White-point clamp (bleed-through crush)
+    3. CLAHE (contrast boost)
+    4. Border crop (perspective rectification)
 
     Saves the result to ``storage/preprocessed/{booklet_id}/page_NNN.png``.
     """
@@ -329,6 +417,10 @@ def preprocess_page(
         result.errors.append(f"Failed to load image: {image_path}")
         return result
 
+    orig_h, orig_w = image.shape[:2]
+    orig_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+    orig_gray_std = float(np.std(orig_gray))
+
     # 1. Deskew
     try:
         image, detected, residual = deskew(image)
@@ -344,15 +436,40 @@ def preprocess_page(
         result.errors.append(f"Deskew failed: {exc}")
         logger.error("Deskew error on %s: %s", image_path.name, exc)
 
-    # 2. CLAHE
+    # 2. White-point clamp (before CLAHE so ghosts are never boosted)
+    wp_stats: dict = {
+        "paper_white": 0.0,
+        "white_point_threshold": 0.0,
+        "clamped_frac": 0.0,
+        "applied": False,
+    }
+    try:
+        image, wp_stats = clamp_white_point(image)
+        result.white_point_clamped = bool(wp_stats.get("applied"))
+        if result.white_point_clamped:
+            logger.info(
+                "White-point clamp %s: paper=%.1f thr=%.1f crushed=%.2f%%",
+                image_path.name,
+                wp_stats["paper_white"],
+                wp_stats["white_point_threshold"],
+                100.0 * wp_stats["clamped_frac"],
+            )
+    except Exception as exc:
+        result.errors.append(f"White-point clamp failed: {exc}")
+        logger.error("White-point clamp error on %s: %s", image_path.name, exc)
+
+    # 3. CLAHE
+    image_after_clahe_std = orig_gray_std
     try:
         image = apply_clahe(image)
         result.clahe_applied = True
+        gray_after_clahe = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+        image_after_clahe_std = float(np.std(gray_after_clahe))
     except Exception as exc:
         result.errors.append(f"CLAHE failed: {exc}")
         logger.error("CLAHE error on %s: %s", image_path.name, exc)
 
-    # 3. Border crop
+    # 4. Border crop
     try:
         image, was_cropped = crop_borders(image)
         result.border_cropped = was_cropped
@@ -362,9 +479,93 @@ def preprocess_page(
         result.errors.append(f"Border crop failed: {exc}")
         logger.error("Border crop error on %s: %s", image_path.name, exc)
 
-    # Save result
+    # Compute Comprehensive Fixing Score (0 - 100)
+    # Quantifies how much degradation was present and how much restoration was applied:
+    # 1. Deskew severity: tilt angle needing correction
+    # 2. Border crop severity: margin/skewed scanner edge cut
+    # 3. Contrast & Dynamic Range Deficit: low baseline luminance standard deviation
+    # 4. Stroke Faintness / Washout: proportion of strokes with faint intensity ([140, 225] vs confident dark [<140])
+    # 5. Non-uniform illumination: luminance spread across quadrants (scanner shadow / uneven light)
+    try:
+        # 1. Deskew Score (0 - 100)
+        deskew_score = min(100.0, (abs(result.skew_detected_deg) / 5.0) * 100.0)
+
+        # 2. Border Crop Score (0 - 100)
+        orig_area = orig_h * orig_w
+        final_h, final_w = image.shape[:2]
+        final_area = final_h * final_w
+        area_diff_ratio = abs(orig_area - final_area) / float(orig_area) if orig_area > 0 else 0.0
+        crop_score = min(100.0, (area_diff_ratio / 0.15) * 100.0) if result.border_cropped else 0.0
+
+        # 3. Contrast Deficit & CLAHE boost (0 - 100)
+        contrast_deficit = max(0.0, (40.0 - orig_gray_std) / 20.0) * 100.0 if orig_gray_std < 40.0 else 0.0
+        clahe_gain = max(0.0, image_after_clahe_std - orig_gray_std)
+        clahe_boost_score = min(100.0, (clahe_gain / 3.0) * 100.0)
+        contrast_score = min(100.0, 0.6 * contrast_deficit + 0.4 * clahe_boost_score)
+
+        # 4. Stroke Faintness / Washout Score (0 - 100)
+        dark_strokes = int(np.sum(orig_gray < 140))
+        faint_strokes = int(np.sum((orig_gray >= 140) & (orig_gray < 225)))
+        total_content = dark_strokes + faint_strokes
+        faint_ratio = (faint_strokes / float(total_content)) if total_content > 0 else 0.0
+        faintness_score = min(100.0, max(0.0, (faint_ratio - 0.20) / 0.25 * 100.0))
+
+        # 5. Lighting Non-uniformity Score (0 - 100)
+        half_h, half_w = orig_h // 2, orig_w // 2
+        q1 = float(np.mean(orig_gray[:half_h, :half_w]))
+        q2 = float(np.mean(orig_gray[:half_h, half_w:]))
+        q3 = float(np.mean(orig_gray[half_h:, :half_w]))
+        q4 = float(np.mean(orig_gray[half_h:, half_w:]))
+        lighting_spread = max(q1, q2, q3, q4) - min(q1, q2, q3, q4)
+        lighting_score = min(100.0, (lighting_spread / 12.0) * 100.0)
+
+        # Composite Fixing Score
+        # If severe deskew or border crop happens, they contribute prominently.
+        # For scans with faint pencil and shadow gradients, contrast & faintness contribute heavily.
+        composite_score = round(
+            0.30 * deskew_score
+            + 0.20 * crop_score
+            + 0.20 * contrast_score
+            + 0.15 * faintness_score
+            + 0.15 * lighting_score,
+            2,
+        )
+        result.fixing_score = composite_score
+        result.metrics = {
+            "deskew_score": round(deskew_score, 1),
+            "crop_score": round(crop_score, 1),
+            "contrast_score": round(contrast_score, 1),
+            "faintness_score": round(faintness_score, 1),
+            "lighting_score": round(lighting_score, 1),
+            "skew_detected_deg": result.skew_detected_deg,
+            "orig_contrast_std": round(orig_gray_std, 2),
+            "final_contrast_std": round(image_after_clahe_std, 2),
+            "faint_ratio": round(faint_ratio, 3),
+            "lighting_spread": round(lighting_spread, 2),
+            "paper_white": wp_stats.get("paper_white", 0.0),
+            "white_point_threshold": wp_stats.get("white_point_threshold", 0.0),
+            "clamped_frac": wp_stats.get("clamped_frac", 0.0),
+            "white_point_clamped": result.white_point_clamped,
+        }
+    except Exception as exc:
+        logger.warning("Failed to compute fixing score for %s: %s", image_path.name, exc)
+        result.fixing_score = 0.0
+
+    # Save result + metrics sidecar (used by the visual benchmark report)
     cv2.imwrite(str(out_path), image)
-    logger.info("Preprocessed → %s", out_path)
+    metrics_path = out_path.with_suffix(".metrics.json")
+    sidecar = {
+        "booklet_id": booklet_id,
+        "page_index": page_index,
+        "fixing_score": result.fixing_score,
+        "white_point_clamped": result.white_point_clamped,
+        "clahe_applied": result.clahe_applied,
+        "border_cropped": result.border_cropped,
+        "skew_detected_deg": result.skew_detected_deg,
+        "metrics": result.metrics,
+    }
+    metrics_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+    logger.info("Preprocessed → %s (Fixing Score: %.1f)", out_path, result.fixing_score)
 
     return result
 
