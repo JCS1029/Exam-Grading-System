@@ -147,8 +147,8 @@ def bleed_through_image(tmp_dir) -> Path:
     img = np.ones((800, 600), dtype=np.uint8) * 252
     img[80:140, 40:560] = 40     # real ink
     img[200:260, 40:560] = 165   # faint front-side pencil
-    img[320:380, 40:560] = 230   # bleed-through ghost
-    img[440:500, 40:560] = 240   # lighter ghost
+    img[320:380, 40:560] = 239   # bleed-through ghost (crushed at default floor 238)
+    img[440:500, 40:560] = 246   # lighter ghost
     path = tmp_dir / "bleed_page.png"
     cv2.imwrite(str(path), img)
     return path
@@ -272,6 +272,19 @@ class TestPreprocessor:
         clamped, stats = clamp_white_point(img)
         assert not stats["applied"]
         assert np.array_equal(clamped, img)
+
+    def test_white_point_respects_higher_floor(self, bleed_through_image, monkeypatch):
+        """Higher CLAMP_FLOOR preserves more faint gray (env tunable)."""
+        monkeypatch.setattr("core.intake.preprocessor.CLAMP_FLOOR", 242)
+
+        img = cv2.imread(str(bleed_through_image), cv2.IMREAD_GRAYSCALE)
+        clamped, stats = clamp_white_point(img)
+
+        assert stats["white_point_threshold"] >= 242
+        # Ghost at 239 should survive when floor is 242
+        assert np.all(clamped[320:380, 40:560] == 239)
+        # Still crushes lighter ghost at 246
+        assert np.all(clamped[440:500, 40:560] == 255)
 
     def test_preprocess_applies_white_point_before_clahe(
         self, tmp_dir, bleed_through_image, monkeypatch

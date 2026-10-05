@@ -41,14 +41,38 @@ MAX_ACCEPTABLE_SKEW_DEG: float = 0.5   # residual angle must be ≤ this
 MAX_CORRECTION_DEG: float = 15.0        # refuse to correct absurd angles
 
 # White-point clamp (bleed-through / show-through suppression)
-# Ghost strokes sit in the top ~15–20% of 8-bit gray (≈215–245) while paper is
+# Ghost strokes sit in the top ~5–10% of 8-bit gray (≈228–245) while paper is
 # ≈250–255 and front-side ink/pencil is ≈0–180. Crush that band to 255 *before*
 # CLAHE so local histogram equalisation cannot amplify the ghosts.
-PAPER_WHITE_PERCENTILE: float = 99.0
-BLEED_BAND_FRAC: float = 0.16          # 16% of 0–255 ≈ 41 gray levels below paper
-INK_SAFE_MAX: int = 180               # never modify real front-side strokes
-CLAMP_FLOOR: int = 215                # default crush threshold (user example)
-MIN_PAPER_WHITE: float = 230.0        # skip clamp on dark / non-paper pages
+#
+# Tune via .env — higher CLAMP_FLOOR = more forgiving toward faint real pencil.
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return float(raw)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return int(raw)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+PAPER_WHITE_PERCENTILE: float = _env_float("WHITE_POINT_PAPER_PERCENTILE", 99.0)
+BLEED_BAND_FRAC: float = _env_float("WHITE_POINT_BLEED_BAND_FRAC", 0.08)
+INK_SAFE_MAX: int = _env_int("WHITE_POINT_INK_SAFE_MAX", 180)
+CLAMP_FLOOR: int = _env_int("WHITE_POINT_CLAMP_FLOOR", 238)
+MIN_PAPER_WHITE: float = _env_float("WHITE_POINT_MIN_PAPER_WHITE", 230.0)
+WHITE_POINT_CLAMP_ENABLED: bool = _env_bool("WHITE_POINT_CLAMP_ENABLED", True)
 
 # CLAHE
 CLAHE_CLIP_LIMIT: float = 2.0
@@ -218,7 +242,18 @@ def clamp_white_point(image: np.ndarray) -> Tuple[np.ndarray, dict]:
 
     Operates on the L channel in LAB so chroma is preserved. Must run
     *before* CLAHE.
+
+    Aggressiveness is controlled by ``WHITE_POINT_CLAMP_FLOOR`` (higher =
+    only nearer-white ghosts removed) and ``WHITE_POINT_BLEED_BAND_FRAC``.
     """
+    if not WHITE_POINT_CLAMP_ENABLED:
+        return image, {
+            "paper_white": 0.0,
+            "white_point_threshold": 0.0,
+            "clamped_frac": 0.0,
+            "applied": False,
+        }
+
     is_color = len(image.shape) == 3
     if is_color:
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
@@ -238,8 +273,8 @@ def clamp_white_point(image: np.ndarray) -> Tuple[np.ndarray, dict]:
     if paper_white < MIN_PAPER_WHITE:
         return image, stats
 
-    # Crush the top 15–20% of the grayscale range below paper white, but
-    # never drop the threshold into real-ink territory.
+    # Crush the near-white band below paper white, but never drop the
+    # threshold into real-ink territory.
     threshold = paper_white - (255.0 * BLEED_BAND_FRAC)
     threshold = max(threshold, float(CLAMP_FLOOR), float(INK_SAFE_MAX))
     if threshold >= paper_white:

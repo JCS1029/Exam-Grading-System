@@ -64,6 +64,10 @@ storage/pseudonym_map.db
 !storage/reports/phase0_review.html
 !storage/reports/phase0_results.json
 !storage/reports/phase0_decision_memo.md
+!storage/reports/phase1_review.html
+!storage/reports/phase2_review.html
+!storage/reports/phase2_results.json
+storage/cache/*
 
 # Testing and Coverage
 .pytest_cache/
