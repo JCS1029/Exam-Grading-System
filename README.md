@@ -78,6 +78,10 @@ cp .env.example .env
 Open `.env` and add your personal API keys (e.g., `GEMINI_API_KEY`, `OPENAI_API_KEY`).  
 > **Warning**: Never commit your `.env` file to Git! It is already listed in `.gitignore`.
 
+**Token budget:** `.env.example` and the Python defaults are deliberately conservative — one cheap model (`gemini-3.6-flash`), smaller images, no dual bake-off, no auto-fallback retries, capped `max_tokens`, minimal thinking. A fresh clone on another machine gets those settings when you copy `.env.example` → `.env` (only paste the API key). Re-runs of the same page/crop hit the local cache under `storage/cache/` and cost $0.
+
+**Privacy:** Exam PDFs, scans, crops, transcripts, caches, and grade files are gitignored. Keep them only on disk under `docs/` / `storage/`. Never commit `.env`.
+
 ---
 
 ## Project Structure

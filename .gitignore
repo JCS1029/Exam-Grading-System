@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 *.env
+!.env.example
 
 # Python Bytecode and Cache
 __pycache__/
@@ -43,7 +44,10 @@ venv.bak/
 .DS_Store
 Thumbs.db
 
-# Sensitive Student Data & Uploads (Prevent Public Repo Leakage)
+# ----------------------------------------------------------
+# Student / exam private data — NEVER commit
+# (scans, crops, transcripts, caches, DBs, local eval labels)
+# ----------------------------------------------------------
 storage/uploads/*
 storage/processed/*
 storage/crops/*
@@ -51,23 +55,37 @@ storage/reports/*
 storage/raw/*
 storage/preprocessed/*
 storage/anonymized/*
+storage/transcripts/*
+storage/eval/*
+storage/cache/*
+storage/pilot_subset/*
+storage/challenge_subset/*
+storage/*.db
+storage/app.db
 storage/pseudonym_map.db
-!storage/raw/.gitkeep
-!storage/preprocessed/.gitkeep
-!storage/anonymized/.gitkeep
+
+# Keep empty dir placeholders in git
 !storage/uploads/.gitkeep
 !storage/processed/.gitkeep
 !storage/crops/.gitkeep
 !storage/reports/.gitkeep
-!storage/crops/pilot/
-!storage/crops/pilot/*
-!storage/reports/phase0_review.html
-!storage/reports/phase0_results.json
+!storage/raw/.gitkeep
+!storage/preprocessed/.gitkeep
+!storage/anonymized/.gitkeep
+!storage/transcripts/.gitkeep
+!storage/eval/.gitkeep
+!storage/cache/.gitkeep
+!storage/pilot_subset/.gitkeep
+!storage/challenge_subset/.gitkeep
+
+# Exam PDFs / student booklet scans under docs/ (private course material)
+docs/Dataset/*
+docs/*.pdf
+!docs/Dataset/.gitkeep
+!docs/Dataset/README.md
+
+# Non-sensitive published review memos only (no embedded student text)
 !storage/reports/phase0_decision_memo.md
-!storage/reports/phase1_review.html
-!storage/reports/phase2_review.html
-!storage/reports/phase2_results.json
-storage/cache/*
 
 # Testing and Coverage
 .pytest_cache/

@@ -19,6 +19,7 @@ numpy>=1.26.0
 
 # Mathematical & Symbolic Computing
 sympy>=1.13.0
+antlr4-python3-runtime==4.11.1   # required by sympy.parsing.latex
 mpmath>=1.3.0
 scipy>=1.14.0
 scikit-learn>=1.5.0

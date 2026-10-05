@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 STORAGE_ROOT: Path = Path(os.getenv("STORAGE_ROOT", "storage"))
 CACHE_DIR: Path = STORAGE_ROOT / "cache" / "phase2_vlm"
 PROMPT_VERSION: str = "phase2_segment_v1"
-MAX_SEND_DIM: int = int(os.getenv("PHASE2_VLM_MAX_DIM", "1600"))
-JPEG_QUALITY: int = int(os.getenv("PHASE2_VLM_JPEG_QUALITY", "85"))
+MAX_SEND_DIM: int = int(os.getenv("PHASE2_VLM_MAX_DIM", "1200"))
+JPEG_QUALITY: int = int(os.getenv("PHASE2_VLM_JPEG_QUALITY", "75"))
 USE_VLM_CACHE: bool = os.getenv("PHASE2_VLM_USE_CACHE", "true").strip().lower() not in (
     "0",
     "false",

@@ -37,13 +37,13 @@
 
 ## Phase 3 — VLM Feasibility Bake-Off & Transcription Pipeline
 
-- [ ] Transcribe segmented crops with candidate models (`gemini-3.5-flash`, `gemini-3.6-flash`)
-- [ ] Objective confidence scoring (reject self-reported 0.95 hallucinated confidence; evaluate SymPy parsing and cross-check)
-- [ ] Resilient API retry loop (`tenacity`) to eliminate 503 drops
-- [ ] Score Hebrew CER via `jiwer` and Math LaTeX parse rate via SymPy
-- [ ] Visual inspection and ground-truth comparison UI
+- [x] Transcribe segmented crops with candidate models (`gemini-3.5-flash`, `gemini-3.6-flash`)
+- [x] Objective confidence scoring (reject self-reported 0.95 hallucinated confidence; evaluate SymPy parsing and cross-check)
+- [x] Resilient API retry loop (`tenacity`) to eliminate 503 drops
+- [x] Score Hebrew CER via `jiwer` and Math LaTeX parse rate via SymPy
+- [x] Visual inspection and ground-truth comparison UI
 
-**Gate:** Hebrew CER $\le 8\%$ · Math formula parse $\ge 90\%$ · 0% unhandled 503 drops · full cohort cost < $25.
+**Gate (verified on 57 answered crops × 2 models):** Hebrew CER ≤ 8% ✅ · Math formula parse ≥ 90% ✅ · 0% unhandled 503s ✅ · cohort cost < $25 ✅. Primary: `gemini-3.6-flash` (CER 0.6%, LaTeX 97%, ~$5.8). Review: `storage/reports/phase3_review.html`.
 
 ---
 

@@ -78,7 +78,8 @@ Phase 0 decides this empirically on real pages. The table below is the starting 
 | Candidate | Role | Why shortlisted |
 | :--- | :--- | :--- |
 | `gemini-3.1-pro-preview` | Primary | Strongest spatial and multimodal reasoning; large context permits whole-page layout reasoning |
-| `gemini-3.5-flash` | Volume tier | Materially cheaper; adequate for legible pages, with escalation on low confidence |
+| `gemini-3.6-flash` | Volume tier (default) | Cheaper than 3.5-flash on OpenRouter; default for transcription |
+| `gemini-3.5-flash` | Optional bake-off | Use only when comparing models; do not enable by default |
 | `gpt-5.6-sol` | Cross-check | Independent architecture and training data, so disagreement is informative |
 | Tesseract-Hebrew / DocTR | Baseline | Quantifies what the VLM actually buys; without a baseline the comparison has no floor |
 

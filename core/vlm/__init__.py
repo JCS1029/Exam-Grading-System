@@ -28,10 +28,14 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
-FAST_VLM_MODEL: str = os.getenv("FAST_VLM_MODEL", "gemini-3.5-flash").strip()
+FAST_VLM_MODEL: str = os.getenv("FAST_VLM_MODEL", "gemini-3.6-flash").strip()
 PRIMARY_VLM_MODEL: str = os.getenv("PRIMARY_VLM_MODEL", "gemini-3.1-pro-preview").strip()
 VLM_TEMPERATURE: float = float(os.getenv("VLM_TEMPERATURE", "0"))
 OPENROUTER_BASE: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+# Cap completion length — long sol-page dumps were burning budget
+VLM_MAX_TOKENS: int = int(os.getenv("VLM_MAX_TOKENS", "4096"))
+# Gemini-on-OpenRouter thinking: minimal | low | medium | high (minimal = cheapest)
+VLM_THINKING_LEVEL: str = os.getenv("VLM_THINKING_LEVEL", "minimal").strip().lower()
 
 
 @dataclass
@@ -71,16 +75,184 @@ def _strip_json_fences(text: str) -> str:
     return clean.strip()
 
 
+# Escapes that are always valid JSON (never LaTeX)
+_JSON_ALWAYS = set('"\\/')
+
+
+def _repair_invalid_json_escapes(text: str) -> str:
+    """
+    Fix LaTeX-style backslashes that break JSON (e.g. ``\\square`` → ``\\\\square``).
+
+    VLMs often emit raw TeX inside JSON strings without doubling backslashes.
+    Heuristic: keep ``\\"``, ``\\\\``, ``\\/``, ``\\uXXXX``; keep ``\\n``/``\\r``/``\\t``
+    only when not starting a TeX command (next char after the escape letter is
+    non-alphabetic). Everything else is doubled — including ``\\b`` in ``\\boxtimes``.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if not in_string:
+            out.append(ch)
+            if ch == '"':
+                in_string = True
+            i += 1
+            continue
+
+        if ch == '"':
+            out.append(ch)
+            in_string = False
+            i += 1
+            continue
+
+        if ch == "\\":
+            nxt = text[i + 1] if i + 1 < n else ""
+            if nxt == "u" and i + 5 < n and all(
+                c in "0123456789abcdefABCDEF" for c in text[i + 2 : i + 6]
+            ):
+                out.append(text[i : i + 6])
+                i += 6
+                continue
+            if nxt in _JSON_ALWAYS:
+                out.append(ch)
+                out.append(nxt)
+                i += 2
+                continue
+            # \n / \r / \t only when not a TeX command like \neq, \rightarrow
+            if nxt in "nrt":
+                after = text[i + 2] if i + 2 < n else ""
+                if not after.isalpha():
+                    out.append(ch)
+                    out.append(nxt)
+                    i += 2
+                    continue
+            # Invalid escape or TeX command — double the backslash
+            out.append("\\\\")
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _close_truncated_json(text: str) -> str:
+    """Best-effort close of truncated JSON objects/arrays/strings."""
+    if not text or text[0] != "{":
+        return text
+    in_string = False
+    escape = False
+    stack: list[str] = []
+    for ch in text:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack and stack[-1] == ch:
+            stack.pop()
+    fixed = text
+    if in_string:
+        fixed += '"'
+    while stack:
+        fixed += stack.pop()
+    return fixed
+
+
+def _repair_unescaped_quotes(text: str) -> str:
+    """
+    Escape bare double-quotes inside JSON string values (e.g. Hebrew מהנ\"ל).
+
+    A quote ends a string only when the next non-space char is , } ] or end.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escape = False
+    while i < n:
+        ch = text[i]
+        if not in_string:
+            out.append(ch)
+            if ch == '"':
+                in_string = True
+            i += 1
+            continue
+
+        if escape:
+            out.append(ch)
+            escape = False
+            i += 1
+            continue
+
+        if ch == "\\":
+            out.append(ch)
+            escape = True
+            i += 1
+            continue
+
+        if ch == '"':
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            nxt = text[j] if j < n else ""
+            if nxt in ",}]:" or nxt == "":
+                out.append(ch)
+                in_string = False
+            else:
+                out.append('\\"')
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def parse_json_response(text: str) -> dict:
-    """Parse model JSON, with a light repair pass for common fence / trailing junk."""
-    clean = _strip_json_fences(text)
-    try:
-        return json.loads(clean)
-    except json.JSONDecodeError:
-        match = re.search(r"\{[\s\S]*\}", clean)
-        if not match:
-            raise
-        return json.loads(match.group(0))
+    """Parse model JSON, repairing fences, LaTeX escapes, quotes, truncation."""
+    if not (text or "").strip():
+        raise json.JSONDecodeError("Expecting value", text or "", 0)
+
+    candidates = [_strip_json_fences(text)]
+    match = re.search(r"\{[\s\S]*\}", candidates[0])
+    if match:
+        candidates.append(match.group(0))
+
+    last_err: Exception | None = None
+    tried: set[str] = set()
+    for base in candidates:
+        variants = [
+            base,
+            _repair_invalid_json_escapes(base),
+            _repair_unescaped_quotes(base),
+            _repair_invalid_json_escapes(_repair_unescaped_quotes(base)),
+            _repair_unescaped_quotes(_repair_invalid_json_escapes(base)),
+            _close_truncated_json(
+                _repair_invalid_json_escapes(_repair_unescaped_quotes(base))
+            ),
+        ]
+        for candidate in variants:
+            if candidate in tried:
+                continue
+            tried.add(candidate)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError as exc:
+                last_err = exc
+                continue
+
+    assert last_err is not None
+    raise last_err
 
 
 def get_default_model(*, primary: bool = False) -> str:
@@ -147,6 +319,7 @@ def _call_openrouter(
     payload: dict[str, Any] = {
         "model": model,
         "temperature": temperature,
+        "max_tokens": VLM_MAX_TOKENS,
         "messages": [
             {
                 "role": "user",
@@ -159,6 +332,9 @@ def _call_openrouter(
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    # Reduce billed "thinking" tokens when the provider supports it
+    if VLM_THINKING_LEVEL and VLM_THINKING_LEVEL != "off":
+        payload["reasoning"] = {"effort": VLM_THINKING_LEVEL}
 
     with httpx.Client(timeout=180.0) as client:
         resp = client.post(
@@ -167,7 +343,7 @@ def _call_openrouter(
                 "Authorization": f"Bearer {GEMINI_API_KEY}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://localhost/exam-grading-system",
-                "X-Title": "Exam Grading System Phase 2",
+                "X-Title": "Exam Grading System",
             },
             json=payload,
         )
@@ -177,13 +353,17 @@ def _call_openrouter(
         data = resp.json()
 
     try:
-        text = data["choices"][0]["message"]["content"] or ""
+        message = data["choices"][0]["message"]
+        text = message.get("content") or ""
+        # Some providers put JSON in refusal / reasoning fields when content is empty
+        if not str(text).strip():
+            text = message.get("reasoning") or message.get("refusal") or ""
     except (KeyError, IndexError, TypeError) as exc:
         raise VLMError(f"Malformed OpenRouter response: {data!r}") from exc
 
     usage = data.get("usage") or {}
     return VLMResponse(
-        text=text,
+        text=str(text),
         model=model,
         latency_sec=round(time.time() - start, 2),
         prompt_tokens=int(usage.get("prompt_tokens") or 0),

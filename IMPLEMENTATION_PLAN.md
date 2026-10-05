@@ -306,7 +306,7 @@ The original configuration pinned `gemini-1.5-pro` and `gemini-1.5-flash`, which
 
 ```ini
 PRIMARY_VLM_MODEL="gemini-3.1-pro-preview"   # strongest spatial/multimodal reasoning
-FAST_VLM_MODEL="gemini-3.5-flash"            # high-volume tier
+FAST_VLM_MODEL="gemini-3.6-flash"            # default volume tier (token-conservative)
 CROSSCHECK_VLM_MODEL="gpt-5.6-sol"           # independent second opinion
 EMBEDDING_MODEL="gemini-embedding-2"         # multimodal; handles text and image crops
 ```
