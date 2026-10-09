@@ -84,25 +84,44 @@ Open `.env` and add your personal API keys (e.g., `GEMINI_API_KEY`, `OPENAI_API_
 
 ---
 
+## Running the pipeline (Phase 0 → Phase 4)
+
+The phases run in order; each one reads what the previous one wrote under `storage/`.
+
+| Phase | Command | Reads | Writes |
+| :--- | :--- | :--- | :--- |
+| 0 — Model bake-off (one-time feasibility, already done) | `python scripts/phase0_benchmark.py` | sample PDFs in `docs/` | `storage/reports/phase0_decision_memo.md` |
+| 1 — Intake, preprocessing, anonymisation | `python scripts/run_phase1.py --input docs/Dataset/exams` | `docs/Dataset/exams/*.pdf` | `storage/raw/`, `storage/preprocessed/`, `storage/anonymized/`, `storage/pseudonym_map.db` |
+| 2 — Layout & question segmentation | `python scripts/run_phase2.py` | `storage/anonymized/` | `storage/crops/` |
+| 3 — Transcription | `python scripts/run_phase3.py` | `storage/crops/` | `storage/transcripts/` |
+| 4 — Grading | `python scripts/run_phase4.py propose` → `approve --version N --by "<name>"` → `grade` → `evaluate` | `storage/anonymized/`, `docs/Dataset/sol.pdf`, `docs/Dataset/grades.csv` | `storage/grading.db`, `storage/reports/phase4_report.md` |
+
+Phases 2–3 serve open (written) answers. The multiple-choice cover sheet is graded in Phase 4 directly from the Phase 1 images, so for an all-MCQ exam Phase 1 → Phase 4 is enough. Grading never runs on an unapproved answer key/rubric.
+
+Exam data lives in `docs/Dataset/` (gitignored, see [`docs/Dataset/README.md`](./docs/Dataset/README.md)):
+
+```
+docs/Dataset/
+  exams/        02.pdf, 05.pdf, …   student booklets, file name = booklet ID
+  sol.pdf                           instructor solution (correct options in red)
+  grades.csv                        instructor grades "id,grade"
+```
+
+---
+
 ## Project Structure
 
 ```
-├── backend/                  # Python backend services
-│   ├── config.py             # Settings and environment variables
-│   ├── schemas.py            # Pydantic data schemas
-│   ├── preprocessing/        # Image deskewing, CLAHE, PII anonymization
-│   ├── layout/               # Multi-column analyzer & reading order DAG
-│   ├── transcription/        # VLM transcription engine (Hebrew + LaTeX)
-│   ├── grading/              # Atomic rubrics, SymPy CAS, Consequential error
-│   ├── plagiarism/           # Decoupled collusion & error fingerprinting
-│   ├── analytics/            # IRT metrics & misconception clustering
-│   └── api/                  # FastAPI endpoints & static file server
-├── frontend/                 # Instructor dashboard & HITL workbench
-├── storage/                  # Local storage for uploads, crops, and reports
-│   ├── uploads/              # Raw exam scans (Git ignored)
-│   ├── processed/            # Anonymized & deskewed images (Git ignored)
-│   └── crops/                # Segmented question crops (Git ignored)
-├── docs/                     # Architectural documentation
+├── core/                     # Python pipeline, one package per phase
+│   ├── intake/               # Phase 1: rasterise, deskew, CLAHE, reconcile, anonymise
+│   ├── layout/               # Phase 2: gutters, VLM question segmentation, tables
+│   ├── transcription/        # Phase 3: VLM transcription (Hebrew + LaTeX), confidence
+│   ├── grading/              # Phase 4: answer key, answer-grid reader, versions, rubrics, consequential error
+│   └── vlm/                  # Shared OpenRouter/Gemini client, spend ledger, budget cap
+├── scripts/                  # run_phase1.py … run_phase4.py, review-page generators
+├── tests/                    # test_phase1.py … test_phase4.py (+ fixtures/phase4 curated sets)
+├── storage/                  # All generated data (Git ignored): pages, crops, transcripts, caches, grading.db, reports
+├── docs/                     # Architecture docs; docs/Dataset/ holds the private exam data
 ├── .env.example              # Template for environment variables
 ├── .gitignore                # Protects secrets and student PII
 ├── requirements.txt          # Python package dependencies

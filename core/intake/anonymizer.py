@@ -311,8 +311,9 @@ def anonymize_booklet(
         logger.warning("Anonymize: no pages for booklet %s", booklet_id)
         return result
 
-    # Generate pseudonym
-    pseudonym = pseudonym_db.generate_pseudonym()
+    # Re-runs must keep the booklet's pseudonym stable
+    existing = pseudonym_db.lookup_by_booklet(booklet_id)
+    pseudonym = existing["pseudonym"] if existing else pseudonym_db.generate_pseudonym()
     result.pseudonym = pseudonym
 
     for idx, page_path in enumerate(pages):

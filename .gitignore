@@ -81,6 +81,8 @@ storage/pseudonym_map.db
 # Exam PDFs / student booklet scans under docs/ (private course material)
 docs/Dataset/*
 docs/*.pdf
+/*.pdf
+/*.csv
 !docs/Dataset/.gitkeep
 !docs/Dataset/README.md
 

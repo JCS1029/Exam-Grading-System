@@ -47,6 +47,32 @@
 
 ---
 
+## Phase 4 — Grading engine (`core/grading/`, `scripts/run_phase4.py`)
+
+- [x] MCQ master key from `sol.pdf` red text (deterministic, no VLM)
+- [x] Answer-grid reader: CV grid + mark detection + cancelled-box rule (130/130 pilot rows)
+- [x] VLM cross-check of the grid crop (table only, no PII); disagreement / low margin / ambiguity → review (130/130, ~$0.004/sheet)
+- [x] Exam version (טור) from the suit symbol, local CV (13/13)
+- [x] Per-version keys derived from each booklet's printed options, mapped to the master via SymPy equivalence; consensus across booklets, dissenting booklets flagged (4/4 versions match hand derivation, unanimous)
+- [x] Rubric model: milestones, alternative paths, MCQ keys per version; validation; LLM rubric proposal for open questions
+- [x] SQLite store (`storage/grading.db`): proposed → approved rubrics, versioning, superseded grades kept for audit, stale-grade detection + `grade --stale-only`
+- [x] Symbolic equivalence (SymPy + numeric spot-check)
+- [x] Consequential error as explicit substitution (`consequential.py`); LLM only reports what the student wrote
+- [x] Open-validity: undeclared method → always human review; proposed full credit only if the LLM judges it sound *and* the final answer is arithmetically correct
+- [x] Reproducibility: temperature 0, model + provider model, prompt version, rubric version/hash, raw response on every grade; content-hash caches; spend ledger + per-run budget cap
+- [x] Curated sets: development (10 alternative / 10 consequential / 3 controls) and held-out (6 / 8 / 3)
+- [x] `tests/test_phase4.py`
+- [ ] Hebrew feedback generation
+- [ ] Instructor review/edit UI for rubrics (approval is currently a CLI step)
+- [ ] Instructor approval of `mcq:203.2480` v1 (approved as `pilot-eval`, keys hand-verified)
+- [ ] Per-question instructor grades for a real open-answer exam (only totals exist for this all-MCQ exam)
+
+**Gate (13 pilot booklets, `storage/reports/phase4_report.md`):** per-question MAE 0.00 / within ±1 100% / signed +0.00 vs hand-verified sheets ✅ · vs recorded totals: 10/13 identical, implied per-question MAE 0.23, signed −0.08, Pearson r 0.963 ✅ · consequential error deducted once: held-out 8/8 ✅ · alternative methods at full credit: held-out **4/6 on the single blind pass** ❌ (H-A3 parser gap, since fixed → 5/6; H-A4 LLM judged a valid shortcut unsound, routed to review). The three total disagreements (05: 40 vs 50, 06: 60 vs 70, 13: 40 vs 30) match hand reading of the sheets — likely recording errors, to confirm with the instructor.
+
+---
+
+# Detailed checklist (numbered as in `IMPLEMENTATION_PLAN.md`; open items still apply)
+
 ## Phase 1 — Intake, booklet reconciliation, preprocessing, anonymisation
 
 - [ ] Multi-page PDF intake via PyMuPDF rasterisation at configurable DPI; direct JPEG/PNG/TIFF
@@ -68,7 +94,7 @@
 
 ---
 
-## Phase 2 — Layout, multi-column reading order, transcription
+## Phases 2–3 — Layout, multi-column reading order, transcription
 
 - [ ] Gutter detection via vertical ink-density projection profile
 - [ ] VLM question and sub-question segmentation, with the gutter prior supplied
@@ -88,7 +114,7 @@
 
 ---
 
-## Phase 3 — Grading engine
+## Phase 4 — Grading engine (detailed)
 
 - [ ] **Rubric extraction** from the instructor's solution and scoring key into weighted milestones
   - [ ] Instructor review-and-edit UI, mandatory before any grading runs — an LLM misreading the scoring key must not silently become the grading standard
@@ -116,7 +142,7 @@
 
 ---
 
-## Phase 4 — Independent copy detection
+## Phase 5 — Independent copy detection
 
 Separate cohort batch job over anonymised transcripts, with no access to grades.
 
@@ -143,7 +169,7 @@ Separate cohort batch job over anonymised transcripts, with no access to grades.
 
 ---
 
-## Phase 5 — Confidence calibration and human review
+## Phase 6 — Confidence calibration and human review
 
 - [ ] **Build the confidence score from trustworthy signals** — not from self-reported model confidence, which is poorly calibrated and will return 0.95 on a garbled transcription
   - [ ] LaTeX parse success and symbolic verification outcome (deterministic — highest trust)
@@ -169,7 +195,7 @@ Separate cohort batch job over anonymised transcripts, with no access to grades.
 
 ---
 
-## Phase 6 — Instructor report and global difficulty diagnostics
+## Phase 7 — Instructor report and global difficulty diagnostics
 
 The brief's stated end goal. Reach a crude version of it early (see Sequencing below) so that running out of time becomes a quality problem rather than an existence problem.
 
@@ -192,7 +218,7 @@ The brief's stated end goal. Reach a crude version of it early (see Sequencing b
 
 ---
 
-## Phase 7 — Privacy, hardening, supervised pilot
+## Phase 8 — Privacy, hardening, supervised pilot
 
 - [ ] **Privacy and legal groundwork, completed before any real student data is processed**
   - [ ] Institutional approval
@@ -208,12 +234,12 @@ The brief's stated end goal. Reach a crude version of it early (see Sequencing b
   - [ ] Partial-batch recovery — a crash at booklet 300 of 400 must not restart from zero
 - [ ] Load check at the design target (300 students × 12 pages within 12 hours)
 - [ ] **Supervised pilot at rung R0 (shadow mode)** — system grades, instructor grades independently, only the comparison is used; no student sees a system-produced grade
-- [ ] Verify the Phase 3 and Phase 5 gates hold on this real data before advancing to R1
+- [ ] Verify the Phase 4 and Phase 6 gates hold on this real data before advancing to R1
 - [ ] API documentation and instructor guide
 - [ ] Verify clean setup from a fresh clone following `README.md`
 - [ ] Docker Compose deployment
 
-**Gate:** zero PII reaching external APIs (audit-verified) · restore performed successfully · full-cohort run completes within 12 hours · interrupted run resumed without loss or duplication · Phase 3 and Phase 5 gates hold on the real shadow-mode exam.
+**Gate:** zero PII reaching external APIs (audit-verified) · restore performed successfully · full-cohort run completes within 12 hours · interrupted run resumed without loss or duplication · Phase 4 and Phase 6 gates hold on the real shadow-mode exam.
 
 ---
 

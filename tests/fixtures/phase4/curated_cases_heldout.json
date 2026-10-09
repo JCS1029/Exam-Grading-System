@@ -1,0 +1,41 @@
+{
+  "_note": "Held-out curated set, written after prompt open_grade_v2 and the scoring code were frozen; run once to report gate rates not tuned on. Same rubric as curated_rubric.json. H-N3 is adversarial: invalid reasoning that lands on the correct answer.",
+  "cases": [
+    {"id": "H-A1", "set": "alternative", "question_id": "2", "declared": true,
+     "transcript": "$P(A)=\\frac25,\\ P(B)=\\frac35$\n$P(A\\cap \\text{תקין})=\\frac25\\cdot\\frac{19}{20}=\\frac{19}{50}$\n$P(B\\cap \\text{תקין})=\\frac35\\cdot\\frac{17}{20}=\\frac{51}{100}$\n$P(\\text{תקין})=\\frac{38}{100}+\\frac{51}{100}=\\frac{89}{100}$\n$P(A|\\text{תקין})=\\frac{38/100}{89/100}=\\frac{38}{89}$"},
+    {"id": "H-A2", "set": "alternative", "question_id": "3", "declared": true,
+     "transcript": "בכל סיבוב שבו אף אחד לא פגע: $\\frac23\\cdot\\frac12=\\frac13$.\n$P(\\text{אליס})=\\frac13+\\frac13\\cdot\\frac13+\\left(\\frac13\\right)^2\\cdot\\frac13+\\dots$\nזה טור הנדסי שסכומו $\\frac{1}{1-\\frac13}=\\frac32$, ולכן $P=\\frac13\\cdot\\frac32=\\frac12$"},
+    {"id": "H-A3", "set": "alternative", "question_id": "6", "declared": true,
+     "transcript": "$X_i$ – מספר הכדורים בכד $i$. בקירוב $X_i\\sim Poi(\\lambda)$ עם $\\lambda=n/m=2$.\n$P(X_i=2)=\\frac{e^{-2}2^2}{2}=2e^{-2}\\approx 0.2707$\nנגדיר אינדיקטורים ומלינאריות התוחלת: $E=1000\\cdot 2e^{-2}\\approx 270.7$, כלומר 271."},
+    {"id": "H-A4", "set": "alternative", "question_id": "3", "declared": true,
+     "transcript": "נסמן $x$ = הסיכוי שאליס מנצחת כשהיא בתור.\nאו שהיא פוגעת מיד, או ששניהם מחטיאים וחוזרים לאותו מצב:\n$x=\\frac13+\\frac13x$\n$\\frac23x=\\frac13$\n$x=\\frac12$"},
+    {"id": "H-A5", "set": "alternative", "question_id": "2", "declared": true,
+     "transcript": "אחוז הפגומים הכולל: $40\\%\\cdot5\\%+60\\%\\cdot15\\%=2\\%+9\\%=11\\%$\nלכן אחוז התקינים $89\\%$.\nתקינים מפס A: $40\\%\\cdot95\\%=38\\%$\nהתשובה: $\\frac{38\\%}{89\\%}\\approx42.7\\%$"},
+    {"id": "H-A6", "set": "alternative", "question_id": "6", "declared": false,
+     "transcript": "נספור זוגות כדורים: לכל זוג כדורים $\\{i,j\\}$ נגדיר אינדיקטור לכך ששניהם באותו כד ואין בכד הזה אף כדור אחר. כל כד עם בדיוק 2 כדורים נספר פעם אחת בדיוק.\n$P=\\frac{1}{1000}\\cdot\\left(\\frac{999}{1000}\\right)^{1998}$\nמספר הזוגות $\\binom{2000}{2}=1999000$, ולכן מלינאריות התוחלת\n$E=1999000\\cdot\\frac{1}{1000}\\cdot0.999^{1998}\\approx1999\\cdot0.13547\\approx270.8$\nתשובה: 271"},
+
+    {"id": "H-C1", "set": "consequential", "question_id": "2", "slip": "m2", "expected_score": 8,
+     "transcript": "$P(A\\cap W)=0.4\\cdot0.95=0.38$\n$P(B\\cap W)=0.6\\cdot0.85=0.54$\n$P(W)=0.38+0.54=0.92$\n$P(A|W)=0.38/0.92\\approx0.4130$"},
+    {"id": "H-C2", "set": "consequential", "question_id": "2", "slip": "c2", "expected_score": 8,
+     "transcript": "$P(D)=0.4\\cdot0.05+0.6\\cdot0.15=0.11$\n$P(\\bar D)=1-0.11=0.79$\n$P(A\\cap\\bar D)=0.4\\cdot0.95=0.38$\n$P(A|\\bar D)=\\frac{0.38}{0.79}\\approx0.481$"},
+    {"id": "H-C3", "set": "consequential", "question_id": "3", "slip": "s2", "expected_score": 7,
+     "transcript": "שניהם מחטיאים בסיבוב: $q=\\frac23\\cdot\\frac12=\\frac13$\n$\\sum_{k=0}^{\\infty} q^k=\\frac{1}{1-\\frac13}=2$\n$P(\\text{אליס מנצחת})=\\frac13\\cdot 2=\\frac23$"},
+    {"id": "H-C4", "set": "consequential", "question_id": "6", "slip": "e1", "expected_score": 5,
+     "transcript": "לפי אינדיקטורים ולינאריות התוחלת $E[X]=1000\\,P(\\text{כד מסוים מכיל בדיוק 2})$.\n$P=\\binom{2000}{2}\\cdot10^{-6}\\cdot0.999^{1998}\\approx0.3$\nולכן $E[X]\\approx 1000\\cdot 0.3=300$"},
+    {"id": "H-C5", "set": "consequential", "question_id": "6", "slip": "p2", "expected_score": 7,
+     "transcript": "קירוב פואסוני עם $\\lambda=2$.\n$P(X=2)=e^{-2}\\cdot2^2\\approx0.54$\nאינדיקטורים + לינאריות: $E=1000\\cdot0.54=540$"},
+    {"id": "H-C6", "set": "consequential", "question_id": "2", "slip": "m2", "expected_score": 8,
+     "transcript": "$P(A\\cap W)=\\frac25\\cdot\\frac{19}{20}=\\frac{19}{50}$\n$P(B\\cap W)=\\frac35\\cdot\\frac{17}{24}=\\frac{17}{40}$\n$P(W)=\\frac{19}{50}+\\frac{17}{40}=\\frac{161}{200}$\n$P(A|W)=\\frac{19/50}{161/200}=\\frac{76}{161}$"},
+    {"id": "H-C7", "set": "consequential", "question_id": "3", "slip": "s1", "expected_score": 7,
+     "transcript": "הסתברות לסיבוב בלי פגיעה: $\\frac13\\cdot\\frac12=\\frac16$\nסכום הטור: $\\frac{1}{1-1/6}=\\frac65$\n$P=\\frac13\\cdot\\frac65=\\frac25$"},
+    {"id": "H-C8", "set": "consequential", "question_id": "2", "slip": "m1", "expected_score": 7,
+     "transcript": "$P(A\\cap W)=0.4\\cdot0.95=0.39$\n$P(B\\cap W)=0.6\\cdot0.85=0.51$\n$P(W)=0.39+0.51=0.9$\n$P(A|W)=\\frac{0.39}{0.9}\\approx0.4333$"},
+
+    {"id": "H-N1", "set": "control", "question_id": "2",
+     "transcript": "המאורעות בלתי תלויים, ולכן $P(A|W)=P(A)=0.4$"},
+    {"id": "H-N2", "set": "control", "question_id": "6",
+     "transcript": "ההסתברות ששני כדורים מסוימים נכנסים לכד מסוים היא $\\left(\\frac1{1000}\\right)^2$, ולכן התוחלת היא $1000\\cdot10^{-6}=0.001$, כלומר 0."},
+    {"id": "H-N3", "set": "control", "question_id": "3",
+     "transcript": "לשני השחקנים יש סיכוי שווה לנצח כי המשחק סימטרי, ולכן הסיכוי של אליס הוא $\\frac12$."}
+  ]
+}

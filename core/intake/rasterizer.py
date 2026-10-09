@@ -85,6 +85,29 @@ def _page_filename(index: int) -> str:
     return f"page_{index + 1:03d}.png"
 
 
+def _effective_dpi(page: "fitz.Page", requested_dpi: int) -> int:
+    """
+    Cap the render DPI at the native resolution of a scanned page.
+
+    Phone-scanner PDFs (CamScanner) often declare one point per pixel, so a
+    fixed 300 DPI render upsamples 4× — no extra detail, 17× the pixels.
+    Born-digital pages (no full-page image) keep the requested DPI.
+    """
+    page_max_in = max(page.rect.width, page.rect.height) / 72.0
+    if page_max_in <= 0:
+        return requested_dpi
+    native = 0.0
+    for img in page.get_images(full=True):
+        img_w, img_h = img[2], img[3]
+        # Full-page scans only — ignore logos / watermarks
+        if max(img_w, img_h) < 1000:
+            continue
+        native = max(native, max(img_w, img_h) / page_max_in)
+    if native <= 0:
+        return requested_dpi
+    return int(max(72, min(requested_dpi, round(native))))
+
+
 # ---------------------------------------------------------------------------
 # Core functions
 # ---------------------------------------------------------------------------
@@ -118,8 +141,7 @@ def rasterize_pdf(
     for page_idx in range(len(doc)):
         try:
             page = doc[page_idx]
-            # Render at target DPI
-            pix = page.get_pixmap(dpi=dpi)
+            pix = page.get_pixmap(dpi=_effective_dpi(page, dpi))
             out_path = out_dir / _page_filename(page_idx)
             pix.save(str(out_path))
 

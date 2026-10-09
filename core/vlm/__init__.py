@@ -18,6 +18,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -46,10 +47,59 @@ class VLMResponse:
     prompt_tokens: int = 0
     candidate_tokens: int = 0
     raw: Any = None
+    cost_usd: float = 0.0          # provider-reported, when available
+    provider_model: str = ""       # exact model id the provider actually served
 
 
 class VLMError(RuntimeError):
     """Raised when a VLM call fails after retries."""
+
+
+class VLMRequestError(RuntimeError):
+    """Non-retryable request failure (bad request, auth, out of credits)."""
+
+
+class BudgetExceeded(RuntimeError):
+    """This process has spent its VLM_RUN_BUDGET_USD — stop, do not retry."""
+
+
+# Spend control: the account has a hard credit cap and no live dashboard for
+# collaborators, so every paid call is logged locally and capped per process.
+SPEND_LEDGER: Path = Path(os.getenv("STORAGE_ROOT", "storage")) / "cache" / "spend_ledger.jsonl"
+VLM_RUN_BUDGET_USD: float = float(os.getenv("VLM_RUN_BUDGET_USD", "1.0"))
+_run_spend_usd: float = 0.0
+
+
+def run_spend_usd() -> float:
+    return _run_spend_usd
+
+
+def _check_budget() -> None:
+    if _run_spend_usd >= VLM_RUN_BUDGET_USD:
+        raise BudgetExceeded(
+            f"run spend ${_run_spend_usd:.4f} reached VLM_RUN_BUDGET_USD=${VLM_RUN_BUDGET_USD:.2f}"
+        )
+
+
+def _record_spend(resp: VLMResponse, purpose: str) -> None:
+    global _run_spend_usd
+    _run_spend_usd += resp.cost_usd
+    entry = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "purpose": purpose,
+        "model": resp.model,
+        "provider_model": resp.provider_model,
+        "prompt_tokens": resp.prompt_tokens,
+        "completion_tokens": resp.candidate_tokens,
+        "cost_usd": resp.cost_usd,
+        "run_total_usd": round(_run_spend_usd, 6),
+    }
+    try:
+        SPEND_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        with SPEND_LEDGER.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except OSError as exc:
+        logger.warning("Could not write spend ledger: %s", exc)
 
 
 def _is_openrouter_key(key: str) -> bool:
@@ -273,17 +323,56 @@ def generate_with_image(
     model: Optional[str] = None,
     temperature: Optional[float] = None,
     json_mode: bool = True,
+    purpose: str = "",
 ) -> VLMResponse:
     """Send an image + text prompt to the configured VLM."""
+    return _generate(
+        prompt, image_bytes, mime_type=mime_type, model=model,
+        temperature=temperature, json_mode=json_mode, purpose=purpose,
+    )
+
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1.5, min=1, max=20),
+    retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TransportError, VLMError)),
+)
+def generate_text(
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    json_mode: bool = True,
+    purpose: str = "",
+) -> VLMResponse:
+    """Text-only call (grading transcripts against a rubric)."""
+    return _generate(
+        prompt, None, mime_type="", model=model,
+        temperature=temperature, json_mode=json_mode, purpose=purpose,
+    )
+
+
+def _generate(
+    prompt: str,
+    image_bytes: Optional[bytes],
+    *,
+    mime_type: str,
+    model: Optional[str],
+    temperature: Optional[float],
+    json_mode: bool,
+    purpose: str,
+) -> VLMResponse:
     if not GEMINI_API_KEY:
         raise VLMError("GEMINI_API_KEY is not set in .env")
+    _check_budget()
 
     model_name = model or get_default_model(primary=False)
     temp = VLM_TEMPERATURE if temperature is None else temperature
     start = time.time()
 
     if _is_openrouter_key(GEMINI_API_KEY):
-        return _call_openrouter(
+        resp = _call_openrouter(
             prompt=prompt,
             image_bytes=image_bytes,
             mime_type=mime_type,
@@ -292,43 +381,44 @@ def generate_with_image(
             json_mode=json_mode,
             start=start,
         )
-
-    return _call_google_genai(
-        prompt=prompt,
-        image_bytes=image_bytes,
-        mime_type=mime_type,
-        model=model_name,
-        temperature=temp,
-        json_mode=json_mode,
-        start=start,
-    )
+    else:
+        resp = _call_google_genai(
+            prompt=prompt,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            model=model_name,
+            temperature=temp,
+            json_mode=json_mode,
+            start=start,
+        )
+    _record_spend(resp, purpose)
+    return resp
 
 
 def _call_openrouter(
     *,
     prompt: str,
-    image_bytes: bytes,
+    image_bytes: Optional[bytes],
     mime_type: str,
     model: str,
     temperature: float,
     json_mode: bool,
     start: float,
 ) -> VLMResponse:
-    b64 = base64.b64encode(image_bytes).decode("ascii")
-    data_url = f"data:{mime_type};base64,{b64}"
+    content: list[dict[str, Any]] = []
+    if image_bytes is not None:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        content.append(
+            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}}
+        )
+    content.append({"type": "text", "text": prompt})
     payload: dict[str, Any] = {
         "model": model,
         "temperature": temperature,
         "max_tokens": VLM_MAX_TOKENS,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
+        "messages": [{"role": "user", "content": content}],
+        # Ask OpenRouter to report the billed cost on every response
+        "usage": {"include": True},
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
@@ -349,6 +439,9 @@ def _call_openrouter(
         )
         if resp.status_code in (429, 500, 502, 503, 504):
             raise VLMError(f"OpenRouter {resp.status_code}: {resp.text[:200]}")
+        if 400 <= resp.status_code < 500:
+            # 400 bad request / 401 auth / 402 out of credits: retrying cannot help
+            raise VLMRequestError(f"OpenRouter {resp.status_code}: {resp.text[:300]}")
         resp.raise_for_status()
         data = resp.json()
 
@@ -369,13 +462,15 @@ def _call_openrouter(
         prompt_tokens=int(usage.get("prompt_tokens") or 0),
         candidate_tokens=int(usage.get("completion_tokens") or 0),
         raw=data,
+        cost_usd=float(usage.get("cost") or 0.0),
+        provider_model=str(data.get("model") or model),
     )
 
 
 def _call_google_genai(
     *,
     prompt: str,
-    image_bytes: bytes,
+    image_bytes: Optional[bytes],
     mime_type: str,
     model: str,
     temperature: float,
@@ -390,13 +485,14 @@ def _call_google_genai(
     if json_mode:
         config_kwargs["response_mime_type"] = "application/json"
 
+    contents: list[Any] = []
+    if image_bytes is not None:
+        contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+    contents.append(prompt)
     try:
         response = client.models.generate_content(
             model=model,
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                prompt,
-            ],
+            contents=contents,
             config=types.GenerateContentConfig(**config_kwargs),
         )
     except Exception as exc:
@@ -414,4 +510,5 @@ def _call_google_genai(
         prompt_tokens=int(getattr(usage, "prompt_token_count", 0) or 0) if usage else 0,
         candidate_tokens=int(getattr(usage, "candidates_token_count", 0) or 0) if usage else 0,
         raw=response,
+        provider_model=str(getattr(response, "model_version", "") or model),
     )
